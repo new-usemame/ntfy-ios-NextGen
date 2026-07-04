@@ -10,7 +10,7 @@ TestFlight: [TESTFLIGHT_LINK_PLACEHOLDER](TESTFLIGHT_LINK_PLACEHOLDER)
 
 ## Reporting a bug
 
-[Open an issue](https://github.com/new-usemame/ntfy-ios-NextGen/issues/new/choose) with your iOS version, device, and app version, plus steps to reproduce. Questions and general discussion: [Discord](DISCORD_INVITE_PLACEHOLDER).
+[Open an issue](https://github.com/new-usemame/ntfy-ios-NextGen/issues/new/choose) with your iOS version, device, and app version, plus steps to reproduce. Questions and general discussion: [Discord](https://discord.gg/WszujZEBbZ).
 
 Bugs in the underlying ntfy server or protocol belong upstream: [binwiederhier/ntfy/issues](https://github.com/binwiederhier/ntfy/issues).
 

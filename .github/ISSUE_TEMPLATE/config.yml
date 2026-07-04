@@ -1,7 +1,7 @@
 blank_issues_enabled: true
 contact_links:
   - name: Questions and discussion
-    url: DISCORD_INVITE_PLACEHOLDER
+    url: https://discord.gg/WszujZEBbZ
     about: For questions and general discussion, rather than a bug report or feature request.
   - name: ntfy server / protocol issues
     url: https://github.com/binwiederhier/ntfy/issues
