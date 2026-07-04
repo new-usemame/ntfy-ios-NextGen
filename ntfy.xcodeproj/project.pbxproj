@@ -68,11 +68,20 @@
 		94CD196A283E666900973B93 /* EmojiManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94CD1969283E666900973B93 /* EmojiManager.swift */; };
 		94CD196B283E666900973B93 /* EmojiManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94CD1969283E666900973B93 /* EmojiManager.swift */; };
 		94E9196C28353E0100F30170 /* Log.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9474F216283531A200CDE4DD /* Log.swift */; };
+		9B84D8DCA80BE0722286AFD4 /* ntfyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFB072E4CE7885C446A0546C /* ntfyTests.swift */; };
 		E27008102AF0F64B006E33BA /* SubscriptionsObservable.swift in Sources */ = {isa = PBXBuildFile; fileRef = E270080F2AF0F64B006E33BA /* SubscriptionsObservable.swift */; };
 		E27008122AF1030A006E33BA /* NotificationsObservable.swift in Sources */ = {isa = PBXBuildFile; fileRef = E27008112AF1030A006E33BA /* NotificationsObservable.swift */; };
+		F87484C0F13BD434C4BEC60F /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C8C21EC8EF14BA1005CF4A4F /* Foundation.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		88B3D3A04E3F90C515BC0059 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 9474F1B5282F2AA700CDE4DD /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 9474F1BC282F2AA700CDE4DD;
+			remoteInfo = ntfy;
+		};
 		9474F1E9282F3FFD00CDE4DD /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 9474F1B5282F2AA700CDE4DD /* Project object */;
@@ -117,6 +126,7 @@
 		29E841A12FB417EA00F927E4 /* NotificationAttachmentSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationAttachmentSectionView.swift; sourceTree = "<group>"; };
 		29E841A22FB417EA00F927E4 /* NotificationListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationListView.swift; sourceTree = "<group>"; };
 		29E841A32FB417EA00F927E4 /* NotificationRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationRowView.swift; sourceTree = "<group>"; };
+		51133DB8582B44DCDD8E14D3 /* ntfyTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ntfyTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		9407EDD9284ADE1F00C1C334 /* User.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = User.swift; sourceTree = "<group>"; };
 		9474F1BD282F2AA700CDE4DD /* ntfy.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ntfy.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		9474F1C0282F2AA700CDE4DD /* AppMain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppMain.swift; sourceTree = "<group>"; };
@@ -146,11 +156,21 @@
 		94B736D6284AF9BE003D69FB /* MainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainView.swift; sourceTree = "<group>"; };
 		94CD1965283E662900973B93 /* emojis.json */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.json; path = emojis.json; sourceTree = "<group>"; };
 		94CD1969283E666900973B93 /* EmojiManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = EmojiManager.swift; sourceTree = "<group>"; };
+		C8C21EC8EF14BA1005CF4A4F /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		E270080F2AF0F64B006E33BA /* SubscriptionsObservable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionsObservable.swift; sourceTree = "<group>"; };
 		E27008112AF1030A006E33BA /* NotificationsObservable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationsObservable.swift; sourceTree = "<group>"; };
+		FFB072E4CE7885C446A0546C /* ntfyTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ntfyTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		3ABFCFF45366E3F1156E0705 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F87484C0F13BD434C4BEC60F /* Foundation.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		9474F1BA282F2AA700CDE4DD /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -212,6 +232,7 @@
 				9474F1E5282F3FFD00CDE4DD /* ntfyNSE */,
 				9474F1BE282F2AA700CDE4DD /* Products */,
 				9474F1DD282F3A2E00CDE4DD /* Frameworks */,
+				BCDAB7772E43C161501373ED /* ntfyTests */,
 			);
 			sourceTree = "<group>";
 		};
@@ -220,6 +241,7 @@
 			children = (
 				9474F1BD282F2AA700CDE4DD /* ntfy.app */,
 				9474F1E4282F3FFD00CDE4DD /* ntfyNSE.appex */,
+				51133DB8582B44DCDD8E14D3 /* ntfyTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -249,6 +271,7 @@
 		9474F1DD282F3A2E00CDE4DD /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				B06D6E2727BD7007A96B1361 /* iOS */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -330,6 +353,23 @@
 			path = Assets;
 			sourceTree = "<group>";
 		};
+		B06D6E2727BD7007A96B1361 /* iOS */ = {
+			isa = PBXGroup;
+			children = (
+				C8C21EC8EF14BA1005CF4A4F /* Foundation.framework */,
+			);
+			name = iOS;
+			sourceTree = "<group>";
+		};
+		BCDAB7772E43C161501373ED /* ntfyTests */ = {
+			isa = PBXGroup;
+			children = (
+				FFB072E4CE7885C446A0546C /* ntfyTests.swift */,
+			);
+			name = ntfyTests;
+			path = ntfyTests;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -372,6 +412,24 @@
 			productReference = 9474F1E4282F3FFD00CDE4DD /* ntfyNSE.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		B7F094E7E428AF0F3871AB73 /* ntfyTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 6F676DD4F02D910A7E213DBB /* Build configuration list for PBXNativeTarget "ntfyTests" */;
+			buildPhases = (
+				FC3FF8364C4E8C07FE20B5E0 /* Sources */,
+				3ABFCFF45366E3F1156E0705 /* Frameworks */,
+				A0F3949E56CFFA39DD20FE1F /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				888EE1C235D53E76929DD7CB /* PBXTargetDependency */,
+			);
+			name = ntfyTests;
+			productName = ntfyTests;
+			productReference = 51133DB8582B44DCDD8E14D3 /* ntfyTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -408,6 +466,7 @@
 			targets = (
 				9474F1BC282F2AA700CDE4DD /* ntfy */,
 				9474F1E3282F3FFD00CDE4DD /* ntfyNSE */,
+				B7F094E7E428AF0F3871AB73 /* ntfyTests */,
 			);
 		};
 /* End PBXProject section */
@@ -429,6 +488,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				94CD1967283E662900973B93 /* emojis.json in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A0F3949E56CFFA39DD20FE1F /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -505,9 +571,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		FC3FF8364C4E8C07FE20B5E0 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9B84D8DCA80BE0722286AFD4 /* ntfyTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		888EE1C235D53E76929DD7CB /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = ntfy;
+			target = 9474F1BC282F2AA700CDE4DD /* ntfy */;
+			targetProxy = 88B3D3A04E3F90C515BC0059 /* PBXContainerItemProxy */;
+		};
 		9474F1EA282F3FFD00CDE4DD /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 9474F1E3282F3FFD00CDE4DD /* ntfyNSE */;
@@ -644,6 +724,7 @@
 				DEVELOPMENT_ASSET_PATHS = "\"ntfy/Assets/Preview Content\"";
 				DEVELOPMENT_TEAM = YXQ4AMS4B4;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_TESTABILITY = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ntfy/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = ntfy;
@@ -756,9 +837,59 @@
 			};
 			name = Release;
 		};
+		CE0DA73FA40BBA13BF9F7904 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = YXQ4AMS4B4;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = io.heckel.ntfy.ntfyTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ntfy.app/ntfy";
+				WRAPPER_EXTENSION = xctest;
+			};
+			name = Debug;
+		};
+		E14A5D7D130B0AC22AAECB3B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = YXQ4AMS4B4;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = io.heckel.ntfy.ntfyTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ntfy.app/ntfy";
+				VALIDATE_PRODUCT = YES;
+				WRAPPER_EXTENSION = xctest;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		6F676DD4F02D910A7E213DBB /* Build configuration list for PBXNativeTarget "ntfyTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E14A5D7D130B0AC22AAECB3B /* Release */,
+				CE0DA73FA40BBA13BF9F7904 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		9474F1B8282F2AA700CDE4DD /* Build configuration list for PBXProject "ntfy" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
