@@ -6,7 +6,8 @@ This is a fork of the official [ntfy-ios](https://github.com/binwiederhier/ntfy-
 
 ## Install
 
-TestFlight: [TESTFLIGHT_LINK_PLACEHOLDER](TESTFLIGHT_LINK_PLACEHOLDER)
+A TestFlight build is coming soon. Until then you can build from source (see `CONTRIBUTING.md`).
+Join the [Discord](https://discord.gg/WszujZEBbZ) to hear when the beta opens.
 
 ## Reporting a bug
 
