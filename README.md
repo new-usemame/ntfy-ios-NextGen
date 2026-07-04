@@ -1,21 +1,33 @@
-#  ntfy iOS App
-This is the iOS app for [ntfy](https://github.com/binwiederhier/ntfy) ([ntfy.sh](https://ntfy.sh)).
+# ntfy iOS NextGen
 
-## Relevant Links
+A community-maintained iOS client for [ntfy](https://github.com/binwiederhier/ntfy) ([ntfy.sh](https://ntfy.sh)), the push-notification service.
 
-- [Android App - Feature Parity](docs/FEATURE_PARITY.md)
-- [Getting Started - Development](docs/GETTING_STARTED.md)
-- [Technical Limitations](docs/TECHNICAL_LIMITATIONS.md)
+This is a fork of the official [ntfy-ios](https://github.com/binwiederhier/ntfy-ios) app. Upstream is community-run and has a backlog of open issues — this fork exists to work through that backlog: bug fixes, subscription display names, deep-linking, and general UX work, with fixes contributed back upstream where they apply cleanly.
 
-## Contact me
-You can directly contact me **[on Discord](https://discord.gg/cT7ECsZj9w)** or [on Matrix](https://matrix.to/#/#ntfy:matrix.org) 
-(bridged from Discord), or via the [GitHub issues](https://github.com/binwiederhier/ntfy/issues), or find more contact information
-[on my website](https://heckel.io/about).
+## Install
+
+TestFlight: [TESTFLIGHT_LINK_PLACEHOLDER](TESTFLIGHT_LINK_PLACEHOLDER)
+
+## Reporting a bug
+
+[Open an issue](https://github.com/new-usemame/ntfy-ios-NextGen/issues/new/choose) with your iOS version, device, and app version, plus steps to reproduce. Questions and general discussion: [Discord](DISCORD_INVITE_PLACEHOLDER).
+
+Bugs in the underlying ntfy server or protocol belong upstream: [binwiederhier/ntfy/issues](https://github.com/binwiederhier/ntfy/issues).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build, run on the simulator, and submit a PR.
+
+## Credits
+
+Originally developed by [@Copephobia](https://github.com/Copephobia), who did the bulk of the initial work. The app was previously maintained by [Philipp C. Heckel](https://heckel.io). This fork is maintained independently from both.
+
+Upstream: [binwiederhier/ntfy-ios](https://github.com/binwiederhier/ntfy-ios). Server, Android app, and docs: [binwiederhier/ntfy](https://github.com/binwiederhier/ntfy), [ntfy.sh/docs](https://ntfy.sh/docs).
+
+## Support
+
+If this fork is useful to you: [Ko-fi](https://ko-fi.com/ntfyiosnextgen).
 
 ## License
-Originally developed by [@Copephobia](https://github.com/Copephobia). He did the bulk of the work, and deserves most
-of the credit. Thank you @Copephobia!
 
-The app is now maintained with ❤️ by [Philipp C. Heckel](https://heckel.io).   
-The project is licensed under the [MIT License](LICENSE).
-
+[MIT](LICENSE), same as upstream.
