@@ -73,4 +73,37 @@ final class ntfyTests: XCTestCase {
         // deterministic
         XCTAssertEqual(t, firebaseTopic(baseUrl: "https://ntfy.example-selfhosted-12345.tld", topic: "secret"))
     }
+
+    // MARK: Notification.format{Message,Title} — title/message/emoji placement rules
+    // (deterministic assertions only — no dependency on the emoji dataset)
+
+    private func makeNotification(message: String?, title: String?, tags: String? = nil) -> ntfy.Notification {
+        let n = ntfy.Notification(context: Store.shared.context)  // in-memory under XCTest; ntfy. disambiguates from Foundation.Notification
+        n.message = message
+        n.title = title
+        n.tags = tags
+        return n
+    }
+
+    func testFormatMessagePlainWhenNoTitleNoTags() {
+        XCTAssertEqual(makeNotification(message: "hello", title: nil, tags: nil).formatMessage(), "hello")
+    }
+
+    func testFormatMessageIsUnchangedWhenTitlePresent() {
+        // With a title, emoji tags decorate the TITLE, so the message body is untouched.
+        XCTAssertEqual(makeNotification(message: "hello", title: "Header", tags: "warning").formatMessage(), "hello")
+    }
+
+    func testFormatMessageNilMessageIsEmptyString() {
+        XCTAssertEqual(makeNotification(message: nil, title: nil, tags: nil).formatMessage(), "")
+    }
+
+    func testFormatTitleNilWhenNoTitle() {
+        XCTAssertNil(makeNotification(message: "hello", title: nil, tags: "warning").formatTitle())
+        XCTAssertNil(makeNotification(message: "hello", title: "", tags: nil).formatTitle())
+    }
+
+    func testFormatTitleReturnsTitleWhenNoTags() {
+        XCTAssertEqual(makeNotification(message: "hello", title: "Header", tags: nil).formatTitle(), "Header")
+    }
 }
