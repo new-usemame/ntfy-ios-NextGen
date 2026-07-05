@@ -57,6 +57,16 @@ struct NotificationRowView: View {
                     }
                 }
                 .padding([.bottom], 2)
+                if #available(iOS 15.0, *), let iconUrl = notification.iconUrl() {
+                    AsyncImage(url: iconUrl) { image in
+                        image.resizable().scaledToFit()
+                    } placeholder: {
+                        Color.clear
+                    }
+                    .frame(width: 40, height: 40)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .padding([.bottom], 4)
+                }
                 if let title = notification.formatTitle(), title != "" {
                     Text(title)
                         .font(.headline)
