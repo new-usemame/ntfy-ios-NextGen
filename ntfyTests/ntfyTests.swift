@@ -40,4 +40,27 @@ final class ntfyTests: XCTestCase {
     func testActionsEncodeNilIsEmptyString() {
         XCTAssertEqual(Actions.shared.encode(nil), "")
     }
+
+    // MARK: linkify — full-range link styling (ntfy #1743 regression)
+
+    func testLinkifyStylesEntireLongUrl() {
+        let url = "https://example.com/very/long/path/that/keeps/going?q=0123456789abcdefghijklmnopqrstuvwxyz"
+        let ns = NSAttributedString(linkify("See \(url) here"))
+        let s = ns.string as NSString
+        let r = s.range(of: url)
+        XCTAssertTrue(r.location != NSNotFound, "URL should be present")
+        // #1743: the link AND explicit color must span the FULL url (check both ends),
+        // not just the recognized prefix.
+        for probe in [r.location, r.location + r.length - 1] {
+            XCTAssertNotNil(ns.attribute(.link, at: probe, effectiveRange: nil),
+                            "link attribute missing at offset \(probe)")
+            XCTAssertNotNil(ns.attribute(.foregroundColor, at: probe, effectiveRange: nil),
+                            "explicit link color missing at offset \(probe) (this is the #1743 fix)")
+        }
+    }
+
+    func testLinkifyPlainTextHasNoLink() {
+        let ns = NSAttributedString(linkify("just plain text, nothing to click here"))
+        XCTAssertNil(ns.attribute(.link, at: 0, effectiveRange: nil))
+    }
 }
