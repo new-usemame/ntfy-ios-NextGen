@@ -3,10 +3,12 @@ import UserNotifications
 
 extension UNMutableNotificationContent {
     func modify(message: Message, baseUrl: String) {
-        // Body and title
-        if let body = message.message {
-            self.body = body
-        }
+        // Body and title.
+        // Always overwrite the body once we've processed the message — even when it
+        // has no text (title-only / attachment-only). Otherwise the incoming push
+        // placeholder ("New message") leaks through on the success path for any
+        // message without a `message` field (ntfy iOS #1080).
+        self.body = message.message ?? ""
         
         // Set notification title to short URL if there is no title. The title is always set
         // by the server, but it may be empty.
