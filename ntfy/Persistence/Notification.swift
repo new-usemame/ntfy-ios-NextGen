@@ -58,6 +58,12 @@ extension Notification {
         return Actions.shared.parse(actions) ?? []
     }
 
+    /// The per-message icon URL from the ntfy `Icon` header (#1107), if any.
+    func iconUrl() -> URL? {
+        guard let icon = icon, !icon.isEmpty else { return nil }
+        return URL(string: icon)
+    }
+
     func messageAttachment() -> MessageAttachment? {
         guard let attachmentUrl = attachmentUrl, !attachmentUrl.isEmpty else {
             return nil
@@ -337,11 +343,13 @@ struct Message: Decodable {
     var pollId: String?
     var attachment: MessageAttachment?
     var contentType: String?
+    var icon: String?
 
     enum CodingKeys: String, CodingKey {
         case id, time, event, topic, message, title, priority, tags, actions, click, attachment
         case pollId = "poll_id"
         case contentType = "content_type"
+        case icon
     }
 
     init(
@@ -357,7 +365,8 @@ struct Message: Decodable {
         click: String? = nil,
         pollId: String? = nil,
         attachment: MessageAttachment? = nil,
-        contentType: String? = nil
+        contentType: String? = nil,
+        icon: String? = nil
     ) {
         self.id = id
         self.time = time
@@ -372,6 +381,7 @@ struct Message: Decodable {
         self.pollId = pollId
         self.attachment = attachment
         self.contentType = contentType
+        self.icon = icon
     }
 
     init(from decoder: Decoder) throws {
@@ -389,6 +399,7 @@ struct Message: Decodable {
         pollId = try container.decodeIfPresent(String.self, forKey: .pollId)
         attachment = try container.decodeIfPresent(MessageAttachment.self, forKey: .attachment)
         contentType = try container.decodeIfPresent(String.self, forKey: .contentType)
+        icon = try container.decodeIfPresent(String.self, forKey: .icon)
     }
     
     func toUserInfo() -> [AnyHashable: Any] {
@@ -407,7 +418,8 @@ struct Message: Decodable {
             "actions": Actions.shared.encode(actions),
             "click": click ?? "",
             "poll_id": pollId ?? "",
-            "content_type": contentType ?? ""
+            "content_type": contentType ?? "",
+            "icon": icon ?? ""
         ]
         if let attachment {
             userInfo["attachment_name"] = attachment.name
@@ -436,6 +448,7 @@ struct Message: Decodable {
         let click = userInfo["click"] as? String
         let pollId = userInfo["poll_id"] as? String
         let contentType = (userInfo["content_type"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let icon = (userInfo["icon"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         let attachmentUrl = userInfo["attachment_url"] as? String
         let attachment: MessageAttachment?
         if let attachmentUrl = attachmentUrl, !attachmentUrl.isEmpty {
@@ -462,7 +475,8 @@ struct Message: Decodable {
             click: click,
             pollId: pollId,
             attachment: attachment,
-            contentType: contentType
+            contentType: contentType,
+            icon: icon
         )
     }
 }

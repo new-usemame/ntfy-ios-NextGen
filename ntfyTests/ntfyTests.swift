@@ -41,6 +41,29 @@ final class ntfyTests: XCTestCase {
         XCTAssertEqual(Actions.shared.encode(nil), "")
     }
 
+    // MARK: Message.icon — per-message icon field (#1107), poll + push paths
+
+    func testMessageDecodesIconFromJson() throws {
+        let json = #"{"id":"x","time":1,"event":"message","topic":"t","message":"hi","icon":"https://ntfy.sh/i.png"}"#.data(using: .utf8)!
+        let m = try JSONDecoder().decode(Message.self, from: json)
+        XCTAssertEqual(m.icon, "https://ntfy.sh/i.png")
+    }
+
+    func testMessageIconRoundTripsThroughUserInfo() {
+        // push/NSE path: toUserInfo -> from(userInfo:) must preserve the icon
+        let m = Message(id: "x", time: 1, event: "message", topic: "t", message: "hi",
+                        icon: "https://ntfy.sh/i.png")
+        XCTAssertEqual(Message.from(userInfo: m.toUserInfo())?.icon, "https://ntfy.sh/i.png")
+    }
+
+    func testMessageIconAbsentNormalizesToNil() throws {
+        let json = #"{"id":"x","time":1,"event":"message","topic":"t","message":"hi"}"#.data(using: .utf8)!
+        let m = try JSONDecoder().decode(Message.self, from: json)
+        XCTAssertNil(m.icon)
+        // empty "" in userInfo must come back as nil, not empty string
+        XCTAssertNil(Message.from(userInfo: m.toUserInfo())?.icon)
+    }
+
     // MARK: renderMessageBody — markdown (#1072) vs plain-text linkification
 
     func testRenderMarkdownStripsSyntax() {
