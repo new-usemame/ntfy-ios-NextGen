@@ -22,6 +22,8 @@ struct NotificationListView: View {
     @State private var showAlert = false
     @State private var activeAlert: ActiveAlert = .clear
     @State private var showCopiedConfirmation = false
+    @State private var showRenameSheet = false
+    @State private var draftDisplayName = ""
     
     private var subscriptionManager: SubscriptionManager {
         return SubscriptionManager(store: store)
@@ -56,7 +58,7 @@ struct NotificationListView: View {
         .environment(\.editMode, self.$editMode)
         .toolbar {
             ToolbarItem(placement: .principal) {
-                Text(subscription.topicName())
+                Text(subscription.displayName())
                     .font(.headline)
                     .lineLimit(1)
             }
@@ -67,6 +69,10 @@ struct NotificationListView: View {
                     Menu {
                         if notificationsModel.notifications.count > 0 {
                             editButton
+                        }
+                        Button("Rename") {
+                            self.draftDisplayName = subscription.customDisplayName ?? ""
+                            self.showRenameSheet = true
                         }
                         Button("Send test notification") {
                             self.sendTestNotification()
@@ -162,6 +168,9 @@ struct NotificationListView: View {
         .onAppear {
             cancelSubscriptionNotifications()
         }
+        .sheet(isPresented: $showRenameSheet) {
+            renameSheet
+        }
         .onDisappear {
             if delegate.selectedBaseUrl == subscription.urlString() {
                 delegate.selectedBaseUrl = nil
@@ -179,6 +188,33 @@ struct NotificationListView: View {
         }
     }
     
+    private var renameSheet: some View {
+        NavigationView {
+            Form {
+                Section(footer: Text("Set a custom name for this subscription. Leave empty to show the topic URL.")) {
+                    TextField(subscription.topicName(), text: $draftDisplayName)
+                        .autocapitalization(.none)
+                        .disableAutocorrection(true)
+                }
+            }
+            .navigationTitle("Display name")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel") {
+                        showRenameSheet = false
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Save") {
+                        store.updateSubscription(subscription: subscription, displayName: draftDisplayName)
+                        showRenameSheet = false
+                    }
+                }
+            }
+        }
+    }
+
     private var editButton: some View {
         if editMode == .inactive {
             return Button(action: {
