@@ -122,7 +122,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
         }
 
         let group = DispatchGroup()
-        let resultQueue = DispatchQueue(label: "io.heckel.ntfy.background-poll-result")
+        let resultQueue = DispatchQueue(label: "com.legitimateapps.ntfynextgen.background-poll-result")
         var didReceiveNewData = false
         subscriptions.forEach { subscription in
             group.enter()

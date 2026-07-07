@@ -25,7 +25,7 @@ class Store: ObservableObject {
     // runs, so shipped builds are unaffected and still use the shared container.
     static let shared = Store(inMemory: NSClassFromString("XCTestCase") != nil)
     static let tag = "Store"
-    static let appGroup = "group.io.heckel.ntfy" // Must match app group of ntfy = ntfyNSE targets
+    static let appGroup = "group.com.legitimateapps.ntfynextgen" // Must match app group of ntfy = ntfyNSE targets
     static let modelName = "ntfy" // Must match .xdatamodeld folder
     static let prefKeyDefaultBaseUrl = "defaultBaseUrl"
     static let prefKeyAttachmentAutoDownloadMaxSize = "attachmentAutoDownloadMaxSize"
