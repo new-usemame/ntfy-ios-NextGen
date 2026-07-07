@@ -336,10 +336,12 @@ struct Message: Decodable {
     var click: String?
     var pollId: String?
     var attachment: MessageAttachment?
+    var contentType: String?
 
     enum CodingKeys: String, CodingKey {
         case id, time, event, topic, message, title, priority, tags, actions, click, attachment
         case pollId = "poll_id"
+        case contentType = "content_type"
     }
 
     init(
@@ -354,7 +356,8 @@ struct Message: Decodable {
         actions: [Action]? = nil,
         click: String? = nil,
         pollId: String? = nil,
-        attachment: MessageAttachment? = nil
+        attachment: MessageAttachment? = nil,
+        contentType: String? = nil
     ) {
         self.id = id
         self.time = time
@@ -368,6 +371,7 @@ struct Message: Decodable {
         self.click = click
         self.pollId = pollId
         self.attachment = attachment
+        self.contentType = contentType
     }
 
     init(from decoder: Decoder) throws {
@@ -384,6 +388,7 @@ struct Message: Decodable {
         click = try container.decodeIfPresent(String.self, forKey: .click)
         pollId = try container.decodeIfPresent(String.self, forKey: .pollId)
         attachment = try container.decodeIfPresent(MessageAttachment.self, forKey: .attachment)
+        contentType = try container.decodeIfPresent(String.self, forKey: .contentType)
     }
     
     func toUserInfo() -> [AnyHashable: Any] {
@@ -401,7 +406,8 @@ struct Message: Decodable {
             "tags": tags?.joined(separator: ",") ?? "",
             "actions": Actions.shared.encode(actions),
             "click": click ?? "",
-            "poll_id": pollId ?? ""
+            "poll_id": pollId ?? "",
+            "content_type": contentType ?? ""
         ]
         if let attachment {
             userInfo["attachment_name"] = attachment.name
@@ -429,6 +435,7 @@ struct Message: Decodable {
         let actions = userInfo["actions"] as? String
         let click = userInfo["click"] as? String
         let pollId = userInfo["poll_id"] as? String
+        let contentType = (userInfo["content_type"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         let attachmentUrl = userInfo["attachment_url"] as? String
         let attachment: MessageAttachment?
         if let attachmentUrl = attachmentUrl, !attachmentUrl.isEmpty {
@@ -454,7 +461,8 @@ struct Message: Decodable {
             actions: Actions.shared.parse(actions),
             click: click,
             pollId: pollId,
-            attachment: attachment
+            attachment: attachment,
+            contentType: contentType
         )
     }
 }

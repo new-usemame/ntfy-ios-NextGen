@@ -4,9 +4,33 @@ import UIKit
 // MARK: Extensions
 
 extension Notification {
-    func linkifiedMessageAttributedString() -> AttributedString {
-        return linkify(formatMessage())
+    /// Body for display: rendered Markdown when the message is `text/markdown`
+    /// (ntfy #1072), otherwise plain text with detected links made tappable.
+    func renderedMessageAttributedString() -> AttributedString {
+        return renderMessageBody(formatMessage(), contentType: contentType)
     }
+
+    func linkifiedMessageAttributedString() -> AttributedString {
+        return renderMessageBody(formatMessage(), contentType: nil)
+    }
+}
+
+/// Pure + testable. Parses Markdown (iOS 15+) when `contentType` is
+/// `text/markdown`; otherwise linkifies plain text via `linkify()`. Markdown
+/// failures fall back to the linkified plain text so a malformed body never
+/// renders empty.
+func renderMessageBody(_ source: String, contentType: String?) -> AttributedString {
+    if #available(iOS 15.0, *), contentType == "text/markdown" {
+        if let attributed = try? AttributedString(
+            markdown: source,
+            options: AttributedString.MarkdownParsingOptions(
+                interpretedSyntax: .inlineOnlyPreservingWhitespace,
+                failurePolicy: .returnPartiallyParsedIfPossible)) {
+            return attributed
+        }
+    }
+    // Plain-text path: full-range link styling (ntfy #1743) via the shared linkify().
+    return linkify(source)
 }
 
 /// Detect links in `source` and return an AttributedString with each link made

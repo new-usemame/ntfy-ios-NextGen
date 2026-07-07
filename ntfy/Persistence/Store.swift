@@ -466,6 +466,7 @@ class Store: ObservableObject {
             notification.id = message.id
             notification.time = message.time
             notification.message = message.message ?? ""
+            notification.contentType = message.contentType
             notification.title = message.title ?? ""
             notification.priority = (message.priority != nil && message.priority != 0) ? message.priority! : 3
             notification.tags = message.tags?.joined(separator: ",") ?? ""
@@ -547,6 +548,7 @@ extension Store {
             notification.id = message.id
             notification.time = message.time
             notification.message = message.message
+            notification.contentType = message.contentType
             notification.title = message.title
             notification.priority = message.priority ?? 3
             notification.tags = message.tags?.joined(separator: ",") ?? ""
