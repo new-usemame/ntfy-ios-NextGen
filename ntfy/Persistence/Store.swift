@@ -157,6 +157,14 @@ class Store: ObservableObject {
             try? context.save()
         }
     }
+
+    func updateSubscription(subscription: Subscription, displayName: String?) {
+        context.performAndWait {
+            let trimmed = displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+            subscription.customDisplayName = (trimmed?.isEmpty ?? true) ? nil : trimmed
+            try? context.save()
+        }
+    }
     
     // MARK: Notifications
     
