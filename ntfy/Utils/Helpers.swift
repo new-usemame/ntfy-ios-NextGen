@@ -47,7 +47,8 @@ func formatBytes(_ bytes: Int64) -> String {
 
 func parseAllTags(_ tags: String?) -> [String] {
     return (tags?.components(separatedBy: ",") ?? [])
-        .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        .map { $0.trimmingCharacters(in: .whitespaces) }
+        .filter { !$0.isEmpty }
 }
 
 func parseEmojiTags(_ tags: String?) -> [String] {

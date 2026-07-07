@@ -112,4 +112,70 @@ final class ntfyTests: XCTestCase {
         let out = renderMessageBody("visit https://ntfy.sh now", contentType: nil)
         XCTAssertTrue(out.runs.contains { $0.link != nil }, "plain-text URLs should be linkified")
     }
+
+    // MARK: Helpers — URL/tag utilities (rebase-regression coverage)
+
+    func testNormalizeBaseUrlStripsTrailingSlashesAndWhitespace() {
+        XCTAssertEqual(normalizeBaseUrl("https://ntfy.sh/"), "https://ntfy.sh")
+        XCTAssertEqual(normalizeBaseUrl("https://ntfy.sh///"), "https://ntfy.sh")
+        XCTAssertEqual(normalizeBaseUrl("  https://ntfy.sh/  "), "https://ntfy.sh")
+        XCTAssertEqual(normalizeBaseUrl("https://ntfy.sh"), "https://ntfy.sh")
+    }
+
+    func testTopicUrlAndShortUrl() {
+        XCTAssertEqual(topicUrl(baseUrl: "https://ntfy.sh/", topic: "mytopic"), "https://ntfy.sh/mytopic")
+        XCTAssertEqual(shortUrl(url: "https://ntfy.sh/mytopic"), "ntfy.sh/mytopic")
+        XCTAssertEqual(topicShortUrl(baseUrl: "https://ntfy.sh/", topic: "mytopic"), "ntfy.sh/mytopic")
+    }
+
+    func testParseAllTagsTrimsAndDropsEmpties() {
+        // spaces after commas must not leak into tag names (they break emoji lookup + display)
+        XCTAssertEqual(parseAllTags("tag1, tag2 ,  ,tag3"), ["tag1", "tag2", "tag3"])
+        XCTAssertEqual(parseAllTags(""), [])
+        XCTAssertEqual(parseAllTags(nil), [])
+    }
+
+    func testFirebaseTopicHashesForNonDefaultServer() {
+        // A clearly non-default self-hosted server must map to a 64-char SHA-256 hex hash,
+        // never the raw topic (which would leak across servers on the shared FCM sender).
+        let t = firebaseTopic(baseUrl: "https://ntfy.example-selfhosted-12345.tld", topic: "secret")
+        XCTAssertEqual(t.count, 64)
+        XCTAssertTrue(t.allSatisfy { $0.isHexDigit })
+        XCTAssertNotEqual(t, "secret")
+        // deterministic
+        XCTAssertEqual(t, firebaseTopic(baseUrl: "https://ntfy.example-selfhosted-12345.tld", topic: "secret"))
+    }
+
+    // MARK: Notification.format{Message,Title} — title/message/emoji placement rules
+    // (deterministic assertions only — no dependency on the emoji dataset)
+
+    private func makeNotification(message: String?, title: String?, tags: String? = nil) -> ntfy.Notification {
+        let n = ntfy.Notification(context: Store.shared.context)  // in-memory under XCTest; ntfy. disambiguates from Foundation.Notification
+        n.message = message
+        n.title = title
+        n.tags = tags
+        return n
+    }
+
+    func testFormatMessagePlainWhenNoTitleNoTags() {
+        XCTAssertEqual(makeNotification(message: "hello", title: nil, tags: nil).formatMessage(), "hello")
+    }
+
+    func testFormatMessageIsUnchangedWhenTitlePresent() {
+        // With a title, emoji tags decorate the TITLE, so the message body is untouched.
+        XCTAssertEqual(makeNotification(message: "hello", title: "Header", tags: "warning").formatMessage(), "hello")
+    }
+
+    func testFormatMessageNilMessageIsEmptyString() {
+        XCTAssertEqual(makeNotification(message: nil, title: nil, tags: nil).formatMessage(), "")
+    }
+
+    func testFormatTitleNilWhenNoTitle() {
+        XCTAssertNil(makeNotification(message: "hello", title: nil, tags: "warning").formatTitle())
+        XCTAssertNil(makeNotification(message: "hello", title: "", tags: nil).formatTitle())
+    }
+
+    func testFormatTitleReturnsTitleWhenNoTags() {
+        XCTAssertEqual(makeNotification(message: "hello", title: "Header", tags: nil).formatTitle(), "Header")
+    }
 }
