@@ -8,7 +8,7 @@
 	<true/>
 	<key>com.apple.security.application-groups</key>
 	<array>
-		<string>group.io.heckel.ntfy</string>
+		<string>group.com.legitimateapps.ntfynextgen</string>
 	</array>
 </dict>
 </plist>
