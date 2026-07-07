@@ -17,6 +17,14 @@ class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         Log.d(tag, "Launching AppDelegate")
 
+        // When the app is launched only as the unit-test host, skip Firebase +
+        // remote-notification registration: they crash the test runner during
+        // bootstrap and aren't needed for logic tests. XCTestCase is only present
+        // when XCTest.framework is loaded (test runs), never in a shipped build.
+        if NSClassFromString("XCTestCase") != nil {
+            return true
+        }
+
         FirebaseApp.configure()
         FirebaseConfiguration.shared.setLoggerLevel(.max)
 

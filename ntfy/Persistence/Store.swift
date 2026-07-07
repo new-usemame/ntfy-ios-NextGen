@@ -19,7 +19,11 @@ class Store: ObservableObject {
         static let autoDownload50MB = 50 * megabyte
     }
 
-    static let shared = Store()
+    // Under unit tests the app runs only as the test host and has no active App
+    // Group entitlement, so the shared container URL is nil — use the in-memory
+    // store to avoid crashing at launch. XCTestCase is only present during test
+    // runs, so shipped builds are unaffected and still use the shared container.
+    static let shared = Store(inMemory: NSClassFromString("XCTestCase") != nil)
     static let tag = "Store"
     static let appGroup = "group.io.heckel.ntfy" // Must match app group of ntfy = ntfyNSE targets
     static let modelName = "ntfy" // Must match .xdatamodeld folder
