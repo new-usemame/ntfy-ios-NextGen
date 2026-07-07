@@ -1,4 +1,5 @@
 import XCTest
+import UserNotifications
 @testable import ntfy
 
 /// Seed unit-test suite for ntfy iOS NextGen.
@@ -39,6 +40,27 @@ final class ntfyTests: XCTestCase {
 
     func testActionsEncodeNilIsEmptyString() {
         XCTAssertEqual(Actions.shared.encode(nil), "")
+    }
+
+    // MARK: UNMutableNotificationContent.modify — never leak the "New message" placeholder (#1080)
+
+    func testModifyReplacesPlaceholderWithRealBody() {
+        let content = UNMutableNotificationContent()
+        content.body = "New message"  // the incoming server placeholder
+        let msg = Message(id: "x", time: 1, event: "message", topic: "t", message: "real body", title: "T")
+        content.modify(message: msg, baseUrl: "https://ntfy.sh")
+        XCTAssertEqual(content.body, "real body")
+    }
+
+    func testModifyNeverLeaksPlaceholderForBodylessMessage() {
+        // A title-only (or attachment-only) message has message.message == nil. Before the fix the
+        // body kept the incoming "New message" placeholder; now it must be cleared. (#1080 regression)
+        let content = UNMutableNotificationContent()
+        content.body = "New message"
+        let msg = Message(id: "x", time: 1, event: "message", topic: "t", message: nil, title: "Only Title")
+        content.modify(message: msg, baseUrl: "https://ntfy.sh")
+        XCTAssertNotEqual(content.body, "New message",
+                          "a processed message must never show the raw push placeholder")
     }
 
     // MARK: Message.icon — per-message icon field (#1107), poll + push paths
