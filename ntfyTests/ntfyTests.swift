@@ -63,4 +63,31 @@ final class ntfyTests: XCTestCase {
         // empty "" in userInfo must come back as nil, not empty string
         XCTAssertNil(Message.from(userInfo: m.toUserInfo())?.icon)
     }
+
+    // MARK: renderMessageBody — markdown (#1072) vs plain-text linkification
+
+    func testRenderMarkdownStripsSyntax() {
+        // text/markdown → "**bold**" parses to "bold" (asterisks consumed = markdown applied)
+        let out = renderMessageBody("**bold** text", contentType: "text/markdown")
+        let plain = String(out.characters)
+        XCTAssertEqual(plain, "bold text")
+        XCTAssertFalse(plain.contains("**"))
+    }
+
+    func testRenderMarkdownParsesLink() {
+        let out = renderMessageBody("see [ntfy](https://ntfy.sh) here", contentType: "text/markdown")
+        XCTAssertFalse(String(out.characters).contains("]("), "link markdown syntax should be consumed")
+        XCTAssertTrue(out.runs.contains { $0.link != nil }, "a real link run should exist")
+    }
+
+    func testRenderPlainLeavesMarkdownLiteral() {
+        // no content type → markdown syntax stays literal (plain-text path)
+        let out = renderMessageBody("**bold**", contentType: nil)
+        XCTAssertEqual(String(out.characters), "**bold**")
+    }
+
+    func testRenderPlainLinkifiesUrls() {
+        let out = renderMessageBody("visit https://ntfy.sh now", contentType: nil)
+        XCTAssertTrue(out.runs.contains { $0.link != nil }, "plain-text URLs should be linkified")
+    }
 }

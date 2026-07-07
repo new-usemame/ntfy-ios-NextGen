@@ -157,6 +157,14 @@ class Store: ObservableObject {
             try? context.save()
         }
     }
+
+    func updateSubscription(subscription: Subscription, displayName: String?) {
+        context.performAndWait {
+            let trimmed = displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+            subscription.customDisplayName = (trimmed?.isEmpty ?? true) ? nil : trimmed
+            try? context.save()
+        }
+    }
     
     // MARK: Notifications
     
@@ -458,6 +466,7 @@ class Store: ObservableObject {
             notification.id = message.id
             notification.time = message.time
             notification.message = message.message ?? ""
+            notification.contentType = message.contentType
             notification.icon = message.icon
             notification.title = message.title ?? ""
             notification.priority = (message.priority != nil && message.priority != 0) ? message.priority! : 3
@@ -540,6 +549,7 @@ extension Store {
             notification.id = message.id
             notification.time = message.time
             notification.message = message.message
+            notification.contentType = message.contentType
             notification.icon = message.icon
             notification.title = message.title
             notification.priority = message.priority ?? 3
