@@ -113,6 +113,29 @@ final class ntfyTests: XCTestCase {
         XCTAssertTrue(out.runs.contains { $0.link != nil }, "plain-text URLs should be linkified")
     }
 
+    func testRenderMarkdownLinkifiesBareUrls() {
+        // A bare URL inside a markdown message must be tappable too — Foundation's
+        // markdown parser only links [text](url)/<url>, not bare "https://…", so the
+        // plain-text path linkified it while the markdown path left it dead (#1743 parity).
+        let out = renderMessageBody("visit https://ntfy.sh now", contentType: "text/markdown")
+        XCTAssertTrue(out.runs.contains { $0.link != nil }, "bare URLs in markdown should be linkified")
+    }
+
+    func testRenderMarkdownBareUrlLinkCoexistsWithBold() {
+        // Adding bare-URL linkification must not clobber markdown's own styling runs.
+        let out = renderMessageBody("**bold** see https://ntfy.sh", contentType: "text/markdown")
+        XCTAssertFalse(String(out.characters).contains("**"), "markdown bold syntax should still be consumed")
+        XCTAssertTrue(out.runs.contains { $0.link != nil }, "the bare URL should still become a link")
+    }
+
+    func testRenderMarkdownAuthoredLinkPreserved() {
+        // An explicit markdown link must keep its target (label != URL), not be overwritten
+        // by the bare-URL detector pass.
+        let out = renderMessageBody("see [ntfy](https://ntfy.sh) here", contentType: "text/markdown")
+        XCTAssertFalse(String(out.characters).contains("]("), "link markdown syntax should be consumed")
+        XCTAssertTrue(out.runs.contains { $0.link != nil }, "the authored link run should survive")
+    }
+
     // MARK: Helpers — URL/tag utilities (rebase-regression coverage)
 
     func testNormalizeBaseUrlStripsTrailingSlashesAndWhitespace() {
