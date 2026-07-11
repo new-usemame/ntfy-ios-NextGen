@@ -1,5 +1,6 @@
 import Foundation
 import UserNotifications
+import CryptoKit
 
 extension UNMutableNotificationContent {
     func modify(message: Message, baseUrl: String) {
@@ -168,20 +169,68 @@ extension UNMutableNotificationContent {
             UNNotificationAction(identifier: $0.id, title: $0.label, options: [.foreground])
         }
 
-        guard !actions.isEmpty else {
+        let categoryId = UNMutableNotificationContent.actionCategoryIdentifier(for: userActions)
+        guard !actions.isEmpty, !categoryId.isEmpty else {
             categoryIdentifier = ""
             return
         }
+        self.categoryIdentifier = categoryId
 
-        let categoryIdentifier = "ntfyActions"
-        self.categoryIdentifier = categoryIdentifier
+        let category = UNNotificationCategory(identifier: categoryId, actions: Array(actions), intentIdentifiers: [])
+        UNMutableNotificationContent.registerCategorySynchronously(category)
+    }
 
-        let center = UNUserNotificationCenter.current()
-        let category = UNNotificationCategory(identifier: categoryIdentifier, actions: actions, intentIdentifiers: [])
-        center.getNotificationCategories { existingCategories in
-            let preservedCategories = existingCategories.filter { $0.identifier != categoryIdentifier }
-            center.setNotificationCategories(Set(preservedCategories).union([category]))
+    /// A stable, cross-process notification-category identifier for a message's action set.
+    ///
+    /// The old code hard-coded a single global `"ntfyActions"` category and rewrote it for
+    /// *every* notification, so two notifications delivered close together with different
+    /// buttons clobbered each other's category — and a message could end up showing the
+    /// wrong (or no) banner actions. Deriving the id from the action set instead means
+    /// notifications with the same buttons share a category and ones with different buttons
+    /// get distinct categories, so they can no longer overwrite each other.
+    ///
+    /// The hash is SHA-256 (not Swift's `Hasher`, which is seeded per-process) precisely
+    /// because the main app and the Notification Service Extension are separate processes
+    /// that must agree on the id for an identical action set. Only the fields that shape the
+    /// rendered banner buttons — each action's identifier and title, in order, capped at the
+    /// same 4 iOS renders — feed the hash. Returns `""` when there are no actions.
+    static func actionCategoryIdentifier(for actions: [Action]) -> String {
+        let capped = actions.prefix(4)
+        guard !capped.isEmpty else { return "" }
+        // Delimit fields/records with control chars that can't appear in button text so
+        // e.g. [("a","bc")] and [("ab","c")] hash to different categories.
+        let canonical = capped
+            .map { "\($0.id)\u{1f}\($0.label)" }
+            .joined(separator: "\u{1e}")
+        let digest = SHA256.hash(data: Data(canonical.utf8))
+        let hex = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+        return "ntfyActions.\(hex)"
+    }
+
+    /// Registers `category` with the notification center *additively* — preserving every
+    /// other already-registered category — and, when called off the main thread, does not
+    /// return until the write has been read back. That closes the original race: the NSE
+    /// used to call its `contentHandler` (delivering the banner) before the async category
+    /// write landed, so the buttons were often missing on first delivery.
+    ///
+    /// `setNotificationCategories` has no completion handler, so registration is confirmed
+    /// with a follow-up `getNotificationCategories` read-back. The wait is bounded by
+    /// `timeout` so a wedged notification center can never hang notification delivery, and
+    /// it is skipped on the main thread (where blocking could deadlock if the center's
+    /// completion also targeted main) — every real caller (`NSE.handleMessage`, the app's
+    /// background-poll path) runs this off-main.
+    static func registerCategorySynchronously(_ category: UNNotificationCategory,
+                                              center: UNUserNotificationCenter = .current(),
+                                              timeout: TimeInterval = 3) {
+        let sem = DispatchSemaphore(value: 0)
+        center.getNotificationCategories { existing in
+            let merged = Set(existing.filter { $0.identifier != category.identifier }).union([category])
+            center.setNotificationCategories(merged)
+            // Read back to confirm the write landed before signalling.
+            center.getNotificationCategories { _ in sem.signal() }
         }
+        guard !Thread.isMainThread else { return }
+        _ = sem.wait(timeout: .now() + timeout)
     }
 
     private func completeAttachmentHandling(message: Message, didAttachImage: Bool, completionHandler: @escaping () -> Void) {
