@@ -201,4 +201,97 @@ final class ntfyTests: XCTestCase {
     func testFormatTitleReturnsTitleWhenNoTags() {
         XCTAssertEqual(makeNotification(message: "hello", title: "Header", tags: nil).formatTitle(), "Header")
     }
+
+    // MARK: UNMutableNotificationContent.modify — priority → interruption level / relevance (critical alerts, ntfy #1235)
+    //
+    // These pin the flagship critical-alerts mapping (the 47-reaction #1235, implemented on main but
+    // previously with zero unit coverage). The priority switch in NotificationContent.modify() *is* the
+    // feature: p5 only elevates to `.critical` when the user opted in (getCriticalAlertsEnabled) AND iOS
+    // granted the critical-alert entitlement (getCriticalAlertsAuthorized) — otherwise it must fall back
+    // to `.timeSensitive`. A silent regression there (e.g. dropping the entitlement gate, or reordering
+    // the relevanceScore ranking) is exactly the class of break a unit test catches before a device
+    // round-trip. All inputs are deterministic under XCTest: Store.shared is in-memory (Store.swift:26)
+    // and both critical-alerts flags are test-settable (Core Data preference + app-group UserDefaults).
+
+    override func tearDown() {
+        // Critical-alerts state is process-global (Store.shared + shared UserDefaults); reset so the
+        // p5 tests can't leak enabled/authorized into each other regardless of execution order.
+        Store.shared.saveCriticalAlertsEnabled(false)
+        Store.saveCriticalAlertsAuthorized(false)
+        super.tearDown()
+    }
+
+    private func modifiedContent(priority: Int16?, title: String? = "T", baseUrl: String = "https://ntfy.sh") -> UNMutableNotificationContent {
+        let content = UNMutableNotificationContent()
+        let msg = Message(id: "x", time: 1, event: "message", topic: "mytopic",
+                          message: "body", title: title, priority: priority)
+        content.modify(message: msg, baseUrl: baseUrl)
+        return content
+    }
+
+    func testModifyPriority1IsPassiveAndLowestRelevance() {
+        let c = modifiedContent(priority: 1)
+        XCTAssertEqual(c.interruptionLevel, .passive)
+        XCTAssertEqual(c.relevanceScore, 0, accuracy: 0.0001)
+    }
+
+    func testModifyPriority2IsPassiveAndLowRelevance() {
+        let c = modifiedContent(priority: 2)
+        XCTAssertEqual(c.interruptionLevel, .passive)
+        XCTAssertEqual(c.relevanceScore, 0.25, accuracy: 0.0001)
+    }
+
+    func testModifyPriority4IsTimeSensitive() {
+        let c = modifiedContent(priority: 4)
+        XCTAssertEqual(c.interruptionLevel, .timeSensitive)
+        XCTAssertEqual(c.relevanceScore, 0.75, accuracy: 0.0001)
+    }
+
+    func testModifyDefaultPriorityIsActive() {
+        // Priority 3 (server default) and an absent priority both fall through to the `default` branch.
+        for p: Int16? in [3, nil] {
+            let c = modifiedContent(priority: p)
+            XCTAssertEqual(c.interruptionLevel, .active, "priority \(String(describing: p)) should be .active")
+            XCTAssertEqual(c.relevanceScore, 0.5, accuracy: 0.0001)
+        }
+    }
+
+    func testModifyPriority5IsCriticalOnlyWhenEnabledAndAuthorized() {
+        Store.shared.saveCriticalAlertsEnabled(true)
+        Store.saveCriticalAlertsAuthorized(true)
+        let c = modifiedContent(priority: 5)
+        XCTAssertEqual(c.interruptionLevel, .critical, "p5 with opt-in + entitlement must be .critical")
+        XCTAssertEqual(c.relevanceScore, 1, accuracy: 0.0001)
+    }
+
+    func testModifyPriority5FallsBackToTimeSensitiveWhenNotAuthorized() {
+        // Opted in, but iOS has NOT granted the critical-alert entitlement → must never use .critical.
+        Store.shared.saveCriticalAlertsEnabled(true)
+        Store.saveCriticalAlertsAuthorized(false)
+        let c = modifiedContent(priority: 5)
+        XCTAssertEqual(c.interruptionLevel, .timeSensitive)
+        XCTAssertEqual(c.relevanceScore, 1, accuracy: 0.0001)
+    }
+
+    func testModifyPriority5FallsBackToTimeSensitiveWhenNotEnabled() {
+        // Entitlement granted, but the user hasn't opted in → must never use .critical.
+        Store.shared.saveCriticalAlertsEnabled(false)
+        Store.saveCriticalAlertsAuthorized(true)
+        let c = modifiedContent(priority: 5)
+        XCTAssertEqual(c.interruptionLevel, .timeSensitive)
+        XCTAssertEqual(c.relevanceScore, 1, accuracy: 0.0001)
+    }
+
+    // MARK: UNMutableNotificationContent.modify — title falls back to the short topic URL
+
+    func testModifyUsesTopicShortUrlWhenTitleMissing() {
+        XCTAssertEqual(modifiedContent(priority: 3, title: "").title, "ntfy.sh/mytopic",
+                       "an empty server title must fall back to the short topic URL")
+        XCTAssertEqual(modifiedContent(priority: 3, title: nil).title, "ntfy.sh/mytopic",
+                       "a missing server title must fall back to the short topic URL")
+    }
+
+    func testModifyKeepsServerTitleWhenPresent() {
+        XCTAssertEqual(modifiedContent(priority: 3, title: "Header").title, "Header")
+    }
 }
