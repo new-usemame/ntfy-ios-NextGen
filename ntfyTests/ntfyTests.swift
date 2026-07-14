@@ -294,4 +294,67 @@ final class ntfyTests: XCTestCase {
     func testModifyKeepsServerTitleWhenPresent() {
         XCTAssertEqual(modifiedContent(priority: 3, title: "Header").title, "Header")
     }
+
+    // MARK: EmojiManager — every gemoji alias must resolve, not just the first
+    //
+    // The bundled emojis.json is gemoji, where an emoji may carry several aliases
+    // ("+1" and "thumbsup" are both 👍). EmojiManager indexed only aliases.first,
+    // so 43 aliases that ntfy's web client accepts silently failed here: the tag
+    // resolved to no emoji and then leaked into the row as a literal text tag.
+
+    func testGetEmojiByAliasResolvesFirstAlias() {
+        XCTAssertEqual(EmojiManager.shared.getEmojiByAlias(alias: "+1")?.getUnicode(), "👍")
+        XCTAssertEqual(EmojiManager.shared.getEmojiByAlias(alias: "hankey")?.getUnicode(), "💩")
+    }
+
+    func testGetEmojiByAliasResolvesNonFirstAliases() {
+        // Each of these is aliases[1..] of its entry — nil before the fix.
+        XCTAssertEqual(EmojiManager.shared.getEmojiByAlias(alias: "thumbsup")?.getUnicode(), "👍")
+        XCTAssertEqual(EmojiManager.shared.getEmojiByAlias(alias: "thumbsdown")?.getUnicode(), "👎")
+        XCTAssertEqual(EmojiManager.shared.getEmojiByAlias(alias: "poop")?.getUnicode(), "💩")
+        XCTAssertEqual(EmojiManager.shared.getEmojiByAlias(alias: "uk")?.getUnicode(), "🇬🇧")
+        XCTAssertEqual(EmojiManager.shared.getEmojiByAlias(alias: "telephone")?.getUnicode(), "☎️")
+    }
+
+    func testGetEmojiByAliasIsNilForUnknownAndEmpty() {
+        XCTAssertNil(EmojiManager.shared.getEmojiByAlias(alias: ""))
+        XCTAssertNil(EmojiManager.shared.getEmojiByAlias(alias: "definitely-not-an-emoji-alias"))
+    }
+
+    func testEveryAliasInTheDatasetResolvesToItsOwnEmoji() {
+        // The contract, dataset-wide: alias -> the emoji that declares it. Indexing every
+        // alias is only safe because gemoji has no alias claimed by two entries; this pins
+        // both halves (full coverage AND no entry shadowing another).
+        let url = Bundle.main.url(forResource: "emojis", withExtension: "json")
+        XCTAssertNotNil(url, "emojis.json must be bundled into the test host")
+        let entries = try! JSONDecoder().decode([Emoji].self, from: Data(contentsOf: url!))
+        XCTAssertGreaterThan(entries.count, 1800, "sanity: the gemoji dataset should be fully loaded")
+
+        var aliasCount = 0
+        for entry in entries {
+            for alias in entry.aliases {
+                aliasCount += 1
+                XCTAssertEqual(EmojiManager.shared.getEmojiByAlias(alias: alias)?.getUnicode(),
+                               entry.getUnicode(),
+                               "alias '\(alias)' must resolve to \(entry.getUnicode())")
+            }
+        }
+        // 1855 aliases across 1812 entries — the 43-alias gap is the bug this pins.
+        XCTAssertGreaterThan(aliasCount, entries.count,
+                             "sanity: the dataset must contain multi-alias entries for this to be meaningful")
+    }
+
+    // MARK: tag parsing over the real dataset — the user-visible half of the alias bug
+
+    func testParseEmojiTagsResolvesNonFirstAlias() {
+        XCTAssertEqual(parseEmojiTags("thumbsup"), ["👍"])
+        XCTAssertEqual(parseEmojiTags("+1,thumbsdown"), ["👍", "👎"])
+    }
+
+    func testParseNonEmojiTagsDoesNotLeakKnownAliasAsLiteralTag() {
+        // The symptom users see: an unresolved alias falls through to the literal tag list,
+        // so the row renders "thumbsup" as text instead of 👍.
+        XCTAssertEqual(parseNonEmojiTags("thumbsup"), [])
+        XCTAssertEqual(parseNonEmojiTags("thumbsup,backup"), ["backup"])
+    }
 }
