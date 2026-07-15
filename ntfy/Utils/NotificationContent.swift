@@ -2,7 +2,7 @@ import Foundation
 import UserNotifications
 
 extension UNMutableNotificationContent {
-    func modify(message: Message, baseUrl: String) {
+    func modify(message: Message, baseUrl: String, displayName: String? = nil) {
         // Body and title.
         // Always overwrite the body once we've processed the message — even when it
         // has no text (title-only / attachment-only). Otherwise the incoming push
@@ -10,12 +10,18 @@ extension UNMutableNotificationContent {
         // message without a `message` field (ntfy iOS #1080).
         self.body = message.message ?? ""
         
-        // Set notification title to short URL if there is no title. The title is always set
-        // by the server, but it may be empty.
+        // Set notification title to the subscription's display name (which is its custom name, if the
+        // user renamed it) and fall back to the short URL. The title is always set by the server, but
+        // it may be empty — and titleless messages are the common case, so without this a renamed
+        // subscription's notifications would keep showing the raw topic URL even though the
+        // subscription list and notification header show the custom name.
         if let title = message.title, title != "" {
             self.title = title
         } else {
-            self.title = topicShortUrl(baseUrl: baseUrl, topic: message.topic)
+            let customTitle = displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.title = (customTitle?.isEmpty == false)
+                ? customTitle!
+                : topicShortUrl(baseUrl: baseUrl, topic: message.topic)
         }
         
         // Emojify title or message
