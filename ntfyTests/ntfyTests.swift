@@ -1,5 +1,6 @@
 import XCTest
 import UserNotifications
+import CoreData
 @testable import ntfy
 
 /// Seed unit-test suite for ntfy iOS NextGen.
@@ -221,11 +222,12 @@ final class ntfyTests: XCTestCase {
         super.tearDown()
     }
 
-    private func modifiedContent(priority: Int16?, title: String? = "T", baseUrl: String = "https://ntfy.sh") -> UNMutableNotificationContent {
+    private func modifiedContent(priority: Int16?, title: String? = "T", baseUrl: String = "https://ntfy.sh",
+                                 displayName: String? = nil, tags: [String]? = nil) -> UNMutableNotificationContent {
         let content = UNMutableNotificationContent()
         let msg = Message(id: "x", time: 1, event: "message", topic: "mytopic",
-                          message: "body", title: title, priority: priority)
-        content.modify(message: msg, baseUrl: baseUrl)
+                          message: "body", title: title, priority: priority, tags: tags)
+        content.modify(message: msg, baseUrl: baseUrl, displayName: displayName)
         return content
     }
 
@@ -293,6 +295,89 @@ final class ntfyTests: XCTestCase {
 
     func testModifyKeepsServerTitleWhenPresent() {
         XCTAssertEqual(modifiedContent(priority: 3, title: "Header").title, "Header")
+    }
+
+    // MARK: UNMutableNotificationContent.modify — a renamed subscription must title its notifications
+    //
+    // A custom display name is a third display surface alongside the subscription list and the
+    // notification list header. Titleless messages are the common case, so a renamed subscription
+    // whose pushes still say "ntfy.sh/mytopic" looks broken exactly where the user looks most.
+    // The Android client does honor it (Util.kt formatTitle -> displayName); iOS was the outlier.
+
+    func testModifyUsesCustomDisplayNameWhenTitleMissing() {
+        XCTAssertEqual(modifiedContent(priority: 3, title: "", displayName: "Home Server").title, "Home Server",
+                       "an empty server title must fall back to the subscription's custom display name")
+        XCTAssertEqual(modifiedContent(priority: 3, title: nil, displayName: "Home Server").title, "Home Server",
+                       "a missing server title must fall back to the subscription's custom display name")
+    }
+
+    func testModifyPrefersServerTitleOverDisplayName() {
+        // The server title is the more specific signal and still wins — renaming a subscription
+        // must not start overwriting per-message titles.
+        XCTAssertEqual(modifiedContent(priority: 3, title: "Header", displayName: "Home Server").title, "Header")
+    }
+
+    func testModifyFallsBackToShortUrlWithoutDisplayName() {
+        // Control: passes before and after the fix. Pins that the change only affects the
+        // renamed case and leaves an unnamed subscription's title exactly as it was.
+        XCTAssertEqual(modifiedContent(priority: 3, title: "", displayName: nil).title, "ntfy.sh/mytopic")
+        XCTAssertEqual(modifiedContent(priority: 3, title: nil, displayName: nil).title, "ntfy.sh/mytopic")
+    }
+
+    func testModifyIgnoresEmptyDisplayName() {
+        // Defensive: Subscription.displayName() never returns empty, but a blank name must never
+        // produce a blank notification title.
+        XCTAssertEqual(modifiedContent(priority: 3, title: "", displayName: "").title, "ntfy.sh/mytopic")
+        XCTAssertEqual(modifiedContent(priority: 3, title: "", displayName: "   ").title, "ntfy.sh/mytopic")
+    }
+
+    func testStoreLookupSuppliesCustomDisplayNameForNotificationTitle() {
+        // Observes the exact expression both modify() call sites use (AppDelegate.showNotification and
+        // the NSE's handleMessage), so the renamed-subscription -> notification-title chain is covered
+        // end-to-end rather than only from modify()'s parameter inward.
+        // NB: don't use Store.saveSubscription here — it does a DispatchQueue.main.sync and would
+        // deadlock on XCTest's main thread. Building on the context directly is enough; Core Data
+        // fetches include pending changes.
+        let context = Store.shared.context
+        let subscription = Subscription(context: context)
+        subscription.baseUrl = "https://ntfy.sh"
+        subscription.topic = "renamedtopic"
+        subscription.customDisplayName = "Home Server"
+        defer { context.delete(subscription) }
+
+        let displayName = Store.shared.getSubscription(baseUrl: "https://ntfy.sh", topic: "renamedtopic")?.displayName()
+        XCTAssertEqual(displayName, "Home Server", "a renamed subscription must resolve to its custom name")
+
+        let content = UNMutableNotificationContent()
+        let msg = Message(id: "y", time: 1, event: "message", topic: "renamedtopic", message: "body", title: nil)
+        content.modify(message: msg, baseUrl: "https://ntfy.sh", displayName: displayName)
+        XCTAssertEqual(content.title, "Home Server",
+                       "a titleless message on a renamed subscription must be titled with the custom name")
+    }
+
+    func testStoreLookupFallsBackToShortUrlForUnnamedSubscription() {
+        // Control: an un-renamed subscription keeps the existing short-URL title.
+        let context = Store.shared.context
+        let subscription = Subscription(context: context)
+        subscription.baseUrl = "https://ntfy.sh"
+        subscription.topic = "plaintopic"
+        defer { context.delete(subscription) }
+
+        let displayName = Store.shared.getSubscription(baseUrl: "https://ntfy.sh", topic: "plaintopic")?.displayName()
+        XCTAssertEqual(displayName, "ntfy.sh/plaintopic")
+
+        let content = UNMutableNotificationContent()
+        let msg = Message(id: "z", time: 1, event: "message", topic: "plaintopic", message: "body", title: nil)
+        content.modify(message: msg, baseUrl: "https://ntfy.sh", displayName: displayName)
+        XCTAssertEqual(content.title, "ntfy.sh/plaintopic")
+    }
+
+    func testModifyRoutesEmojisToBodyWhenTitleMissingEvenWithDisplayName() {
+        // Emoji routing must not change: with no server title the emojis prefix the BODY, and the
+        // display name titles the notification cleanly (matches Android formatTitle/formatMessage).
+        let c = modifiedContent(priority: 3, title: "", displayName: "Home Server", tags: ["+1"])
+        XCTAssertEqual(c.title, "Home Server", "emojis must not be prefixed onto the display name")
+        XCTAssertEqual(c.body, "👍 body")
     }
 
     // MARK: EmojiManager — every gemoji alias must resolve, not just the first
