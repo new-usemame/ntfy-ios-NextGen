@@ -22,8 +22,10 @@ class EmojiManager {
                 let jsonData = try Data(contentsOf: url)
                 if let jsonEmojis = try? JSONDecoder().decode([Emoji].self, from: jsonData) {
                     for emoji in jsonEmojis {
-                        if !emoji.aliases.isEmpty {
-                            EmojiManager.emojis[emoji.aliases.first!] = emoji
+                        // gemoji entries may carry several aliases ("+1" and "thumbsup" are both 👍);
+                        // index every one, or tags the other ntfy clients accept won't resolve here.
+                        for alias in emoji.aliases {
+                            EmojiManager.emojis[alias] = emoji
                         }
                     }
                 }

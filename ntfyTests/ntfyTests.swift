@@ -1,5 +1,6 @@
 import XCTest
 import UserNotifications
+import CoreData
 @testable import ntfy
 
 /// Seed unit-test suite for ntfy iOS NextGen.
@@ -238,5 +239,245 @@ final class ntfyTests: XCTestCase {
     func testHttpActionResultSuccessWhenNoHttpResponseAndNoError() {
         // Non-HTTP response with no transport error: nothing to assess → treat as success.
         XCTAssertEqual(ActionExecutor.httpActionResult(response: nil, error: nil), .success)
+    }
+
+    // MARK: UNMutableNotificationContent.modify — priority → interruption level / relevance (critical alerts, ntfy #1235)
+    //
+    // These pin the flagship critical-alerts mapping (the 47-reaction #1235, implemented on main but
+    // previously with zero unit coverage). The priority switch in NotificationContent.modify() *is* the
+    // feature: p5 only elevates to `.critical` when the user opted in (getCriticalAlertsEnabled) AND iOS
+    // granted the critical-alert entitlement (getCriticalAlertsAuthorized) — otherwise it must fall back
+    // to `.timeSensitive`. A silent regression there (e.g. dropping the entitlement gate, or reordering
+    // the relevanceScore ranking) is exactly the class of break a unit test catches before a device
+    // round-trip. All inputs are deterministic under XCTest: Store.shared is in-memory (Store.swift:26)
+    // and both critical-alerts flags are test-settable (Core Data preference + app-group UserDefaults).
+
+    override func tearDown() {
+        // Critical-alerts state is process-global (Store.shared + shared UserDefaults); reset so the
+        // p5 tests can't leak enabled/authorized into each other regardless of execution order.
+        Store.shared.saveCriticalAlertsEnabled(false)
+        Store.saveCriticalAlertsAuthorized(false)
+        super.tearDown()
+    }
+
+    private func modifiedContent(priority: Int16?, title: String? = "T", baseUrl: String = "https://ntfy.sh",
+                                 displayName: String? = nil, tags: [String]? = nil) -> UNMutableNotificationContent {
+        let content = UNMutableNotificationContent()
+        let msg = Message(id: "x", time: 1, event: "message", topic: "mytopic",
+                          message: "body", title: title, priority: priority, tags: tags)
+        content.modify(message: msg, baseUrl: baseUrl, displayName: displayName)
+        return content
+    }
+
+    func testModifyPriority1IsPassiveAndLowestRelevance() {
+        let c = modifiedContent(priority: 1)
+        XCTAssertEqual(c.interruptionLevel, .passive)
+        XCTAssertEqual(c.relevanceScore, 0, accuracy: 0.0001)
+    }
+
+    func testModifyPriority2IsPassiveAndLowRelevance() {
+        let c = modifiedContent(priority: 2)
+        XCTAssertEqual(c.interruptionLevel, .passive)
+        XCTAssertEqual(c.relevanceScore, 0.25, accuracy: 0.0001)
+    }
+
+    func testModifyPriority4IsTimeSensitive() {
+        let c = modifiedContent(priority: 4)
+        XCTAssertEqual(c.interruptionLevel, .timeSensitive)
+        XCTAssertEqual(c.relevanceScore, 0.75, accuracy: 0.0001)
+    }
+
+    func testModifyDefaultPriorityIsActive() {
+        // Priority 3 (server default) and an absent priority both fall through to the `default` branch.
+        for p: Int16? in [3, nil] {
+            let c = modifiedContent(priority: p)
+            XCTAssertEqual(c.interruptionLevel, .active, "priority \(String(describing: p)) should be .active")
+            XCTAssertEqual(c.relevanceScore, 0.5, accuracy: 0.0001)
+        }
+    }
+
+    func testModifyPriority5IsCriticalOnlyWhenEnabledAndAuthorized() {
+        Store.shared.saveCriticalAlertsEnabled(true)
+        Store.saveCriticalAlertsAuthorized(true)
+        let c = modifiedContent(priority: 5)
+        XCTAssertEqual(c.interruptionLevel, .critical, "p5 with opt-in + entitlement must be .critical")
+        XCTAssertEqual(c.relevanceScore, 1, accuracy: 0.0001)
+    }
+
+    func testModifyPriority5FallsBackToTimeSensitiveWhenNotAuthorized() {
+        // Opted in, but iOS has NOT granted the critical-alert entitlement → must never use .critical.
+        Store.shared.saveCriticalAlertsEnabled(true)
+        Store.saveCriticalAlertsAuthorized(false)
+        let c = modifiedContent(priority: 5)
+        XCTAssertEqual(c.interruptionLevel, .timeSensitive)
+        XCTAssertEqual(c.relevanceScore, 1, accuracy: 0.0001)
+    }
+
+    func testModifyPriority5FallsBackToTimeSensitiveWhenNotEnabled() {
+        // Entitlement granted, but the user hasn't opted in → must never use .critical.
+        Store.shared.saveCriticalAlertsEnabled(false)
+        Store.saveCriticalAlertsAuthorized(true)
+        let c = modifiedContent(priority: 5)
+        XCTAssertEqual(c.interruptionLevel, .timeSensitive)
+        XCTAssertEqual(c.relevanceScore, 1, accuracy: 0.0001)
+    }
+
+    // MARK: UNMutableNotificationContent.modify — title falls back to the short topic URL
+
+    func testModifyUsesTopicShortUrlWhenTitleMissing() {
+        XCTAssertEqual(modifiedContent(priority: 3, title: "").title, "ntfy.sh/mytopic",
+                       "an empty server title must fall back to the short topic URL")
+        XCTAssertEqual(modifiedContent(priority: 3, title: nil).title, "ntfy.sh/mytopic",
+                       "a missing server title must fall back to the short topic URL")
+    }
+
+    func testModifyKeepsServerTitleWhenPresent() {
+        XCTAssertEqual(modifiedContent(priority: 3, title: "Header").title, "Header")
+    }
+
+    // MARK: UNMutableNotificationContent.modify — a renamed subscription must title its notifications
+    //
+    // A custom display name is a third display surface alongside the subscription list and the
+    // notification list header. Titleless messages are the common case, so a renamed subscription
+    // whose pushes still say "ntfy.sh/mytopic" looks broken exactly where the user looks most.
+    // The Android client does honor it (Util.kt formatTitle -> displayName); iOS was the outlier.
+
+    func testModifyUsesCustomDisplayNameWhenTitleMissing() {
+        XCTAssertEqual(modifiedContent(priority: 3, title: "", displayName: "Home Server").title, "Home Server",
+                       "an empty server title must fall back to the subscription's custom display name")
+        XCTAssertEqual(modifiedContent(priority: 3, title: nil, displayName: "Home Server").title, "Home Server",
+                       "a missing server title must fall back to the subscription's custom display name")
+    }
+
+    func testModifyPrefersServerTitleOverDisplayName() {
+        // The server title is the more specific signal and still wins — renaming a subscription
+        // must not start overwriting per-message titles.
+        XCTAssertEqual(modifiedContent(priority: 3, title: "Header", displayName: "Home Server").title, "Header")
+    }
+
+    func testModifyFallsBackToShortUrlWithoutDisplayName() {
+        // Control: passes before and after the fix. Pins that the change only affects the
+        // renamed case and leaves an unnamed subscription's title exactly as it was.
+        XCTAssertEqual(modifiedContent(priority: 3, title: "", displayName: nil).title, "ntfy.sh/mytopic")
+        XCTAssertEqual(modifiedContent(priority: 3, title: nil, displayName: nil).title, "ntfy.sh/mytopic")
+    }
+
+    func testModifyIgnoresEmptyDisplayName() {
+        // Defensive: Subscription.displayName() never returns empty, but a blank name must never
+        // produce a blank notification title.
+        XCTAssertEqual(modifiedContent(priority: 3, title: "", displayName: "").title, "ntfy.sh/mytopic")
+        XCTAssertEqual(modifiedContent(priority: 3, title: "", displayName: "   ").title, "ntfy.sh/mytopic")
+    }
+
+    func testStoreLookupSuppliesCustomDisplayNameForNotificationTitle() {
+        // Observes the exact expression both modify() call sites use (AppDelegate.showNotification and
+        // the NSE's handleMessage), so the renamed-subscription -> notification-title chain is covered
+        // end-to-end rather than only from modify()'s parameter inward.
+        // NB: don't use Store.saveSubscription here — it does a DispatchQueue.main.sync and would
+        // deadlock on XCTest's main thread. Building on the context directly is enough; Core Data
+        // fetches include pending changes.
+        let context = Store.shared.context
+        let subscription = Subscription(context: context)
+        subscription.baseUrl = "https://ntfy.sh"
+        subscription.topic = "renamedtopic"
+        subscription.customDisplayName = "Home Server"
+        defer { context.delete(subscription) }
+
+        let displayName = Store.shared.getSubscription(baseUrl: "https://ntfy.sh", topic: "renamedtopic")?.displayName()
+        XCTAssertEqual(displayName, "Home Server", "a renamed subscription must resolve to its custom name")
+
+        let content = UNMutableNotificationContent()
+        let msg = Message(id: "y", time: 1, event: "message", topic: "renamedtopic", message: "body", title: nil)
+        content.modify(message: msg, baseUrl: "https://ntfy.sh", displayName: displayName)
+        XCTAssertEqual(content.title, "Home Server",
+                       "a titleless message on a renamed subscription must be titled with the custom name")
+    }
+
+    func testStoreLookupFallsBackToShortUrlForUnnamedSubscription() {
+        // Control: an un-renamed subscription keeps the existing short-URL title.
+        let context = Store.shared.context
+        let subscription = Subscription(context: context)
+        subscription.baseUrl = "https://ntfy.sh"
+        subscription.topic = "plaintopic"
+        defer { context.delete(subscription) }
+
+        let displayName = Store.shared.getSubscription(baseUrl: "https://ntfy.sh", topic: "plaintopic")?.displayName()
+        XCTAssertEqual(displayName, "ntfy.sh/plaintopic")
+
+        let content = UNMutableNotificationContent()
+        let msg = Message(id: "z", time: 1, event: "message", topic: "plaintopic", message: "body", title: nil)
+        content.modify(message: msg, baseUrl: "https://ntfy.sh", displayName: displayName)
+        XCTAssertEqual(content.title, "ntfy.sh/plaintopic")
+    }
+
+    func testModifyRoutesEmojisToBodyWhenTitleMissingEvenWithDisplayName() {
+        // Emoji routing must not change: with no server title the emojis prefix the BODY, and the
+        // display name titles the notification cleanly (matches Android formatTitle/formatMessage).
+        let c = modifiedContent(priority: 3, title: "", displayName: "Home Server", tags: ["+1"])
+        XCTAssertEqual(c.title, "Home Server", "emojis must not be prefixed onto the display name")
+        XCTAssertEqual(c.body, "👍 body")
+    }
+
+    // MARK: EmojiManager — every gemoji alias must resolve, not just the first
+    //
+    // The bundled emojis.json is gemoji, where an emoji may carry several aliases
+    // ("+1" and "thumbsup" are both 👍). EmojiManager indexed only aliases.first,
+    // so 43 aliases that ntfy's web client accepts silently failed here: the tag
+    // resolved to no emoji and then leaked into the row as a literal text tag.
+
+    func testGetEmojiByAliasResolvesFirstAlias() {
+        XCTAssertEqual(EmojiManager.shared.getEmojiByAlias(alias: "+1")?.getUnicode(), "👍")
+        XCTAssertEqual(EmojiManager.shared.getEmojiByAlias(alias: "hankey")?.getUnicode(), "💩")
+    }
+
+    func testGetEmojiByAliasResolvesNonFirstAliases() {
+        // Each of these is aliases[1..] of its entry — nil before the fix.
+        XCTAssertEqual(EmojiManager.shared.getEmojiByAlias(alias: "thumbsup")?.getUnicode(), "👍")
+        XCTAssertEqual(EmojiManager.shared.getEmojiByAlias(alias: "thumbsdown")?.getUnicode(), "👎")
+        XCTAssertEqual(EmojiManager.shared.getEmojiByAlias(alias: "poop")?.getUnicode(), "💩")
+        XCTAssertEqual(EmojiManager.shared.getEmojiByAlias(alias: "uk")?.getUnicode(), "🇬🇧")
+        XCTAssertEqual(EmojiManager.shared.getEmojiByAlias(alias: "telephone")?.getUnicode(), "☎️")
+    }
+
+    func testGetEmojiByAliasIsNilForUnknownAndEmpty() {
+        XCTAssertNil(EmojiManager.shared.getEmojiByAlias(alias: ""))
+        XCTAssertNil(EmojiManager.shared.getEmojiByAlias(alias: "definitely-not-an-emoji-alias"))
+    }
+
+    func testEveryAliasInTheDatasetResolvesToItsOwnEmoji() {
+        // The contract, dataset-wide: alias -> the emoji that declares it. Indexing every
+        // alias is only safe because gemoji has no alias claimed by two entries; this pins
+        // both halves (full coverage AND no entry shadowing another).
+        let url = Bundle.main.url(forResource: "emojis", withExtension: "json")
+        XCTAssertNotNil(url, "emojis.json must be bundled into the test host")
+        let entries = try! JSONDecoder().decode([Emoji].self, from: Data(contentsOf: url!))
+        XCTAssertGreaterThan(entries.count, 1800, "sanity: the gemoji dataset should be fully loaded")
+
+        var aliasCount = 0
+        for entry in entries {
+            for alias in entry.aliases {
+                aliasCount += 1
+                XCTAssertEqual(EmojiManager.shared.getEmojiByAlias(alias: alias)?.getUnicode(),
+                               entry.getUnicode(),
+                               "alias '\(alias)' must resolve to \(entry.getUnicode())")
+            }
+        }
+        // 1855 aliases across 1812 entries — the 43-alias gap is the bug this pins.
+        XCTAssertGreaterThan(aliasCount, entries.count,
+                             "sanity: the dataset must contain multi-alias entries for this to be meaningful")
+    }
+
+    // MARK: tag parsing over the real dataset — the user-visible half of the alias bug
+
+    func testParseEmojiTagsResolvesNonFirstAlias() {
+        XCTAssertEqual(parseEmojiTags("thumbsup"), ["👍"])
+        XCTAssertEqual(parseEmojiTags("+1,thumbsdown"), ["👍", "👎"])
+    }
+
+    func testParseNonEmojiTagsDoesNotLeakKnownAliasAsLiteralTag() {
+        // The symptom users see: an unresolved alias falls through to the literal tag list,
+        // so the row renders "thumbsup" as text instead of 👍.
+        XCTAssertEqual(parseNonEmojiTags("thumbsup"), [])
+        XCTAssertEqual(parseNonEmojiTags("thumbsup,backup"), ["backup"])
     }
 }
