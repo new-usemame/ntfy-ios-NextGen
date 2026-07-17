@@ -83,7 +83,7 @@ extension UNMutableNotificationContent {
         self.userInfo["base_url"] = baseUrl
     }
 
-    func attachImageIfNeeded(message: Message, user: BasicUser?, completionHandler: @escaping () -> Void) {
+    func attachImageIfNeeded(message: Message, user: BasicUser?, session: URLSession? = nil, completionHandler: @escaping () -> Void) {
         guard let attachment = message.attachment else {
             completeAttachmentHandling(message: message, didAttachImage: false, completionHandler: completionHandler)
             return
@@ -106,17 +106,30 @@ extension UNMutableNotificationContent {
             return
         }
 
+        // Honor Settings -> "Download attachments" before touching the network. Reusing an already
+        // downloaded file above is deliberately not gated — it costs no traffic, and the setting is
+        // about fetching. When we skip, completeAttachmentHandling still appends the name/size summary,
+        // so the attachment is announced rather than silently dropped.
+        guard Store.shared.shouldAutoDownloadAttachment(attachment) else {
+            Log.d("NotificationContent", "Skipping attachment auto-download per user preference", message.id)
+            completeAttachmentHandling(message: message, didAttachImage: false, completionHandler: completionHandler)
+            return
+        }
+
         var request = URLRequest(url: url)
         request.setValue(ApiService.userAgent, forHTTPHeaderField: "User-Agent")
         if let user = user {
             request.setValue(user.toHeader(), forHTTPHeaderField: "Authorization")
         }
 
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 20
-        config.timeoutIntervalForResource = 20
+        let downloadSession = session ?? {
+            let config = URLSessionConfiguration.ephemeral
+            config.timeoutIntervalForRequest = 20
+            config.timeoutIntervalForResource = 20
+            return URLSession(configuration: config)
+        }()
 
-        URLSession(configuration: config).downloadTask(with: request) { tempUrl, response, _ in
+        downloadSession.downloadTask(with: request) { tempUrl, response, _ in
             guard
                 let tempUrl,
                 let httpResponse = response as? HTTPURLResponse,

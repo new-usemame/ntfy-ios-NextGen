@@ -112,8 +112,14 @@ enum AttachmentFileStore {
     }
 
     private static func localFileUrl(notificationID: String, attachment: MessageAttachment, remoteUrl: URL, mimeType: String?) throws -> URL {
-        let baseDir = FileManager.default
-            .containerURL(forSecurityApplicationGroupIdentifier: Store.appGroup)!
+        // Throw rather than force-unwrap: the app-group container is absent whenever the group
+        // entitlement isn't applied to the running process, and callers already treat a failure here
+        // as "no local file" instead of crashing the app or the notification service extension.
+        guard let containerUrl = FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: Store.appGroup) else {
+            throw AttachmentDownloadError.containerUnavailable
+        }
+        let baseDir = containerUrl
             .appendingPathComponent(attachmentsDir, isDirectory: true)
         try FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true)
 
@@ -137,6 +143,7 @@ enum AttachmentDownloadError: LocalizedError {
     case missingUrl
     case badResponse
     case tooLarge
+    case containerUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -146,6 +153,8 @@ enum AttachmentDownloadError: LocalizedError {
             return "Attachment download failed."
         case .tooLarge:
             return "Attachment is larger than the auto-download limit."
+        case .containerUnavailable:
+            return "Attachment storage is unavailable."
         }
     }
 }

@@ -380,6 +380,157 @@ final class ntfyTests: XCTestCase {
         XCTAssertEqual(c.body, "👍 body")
     }
 
+    // MARK: attachImageIfNeeded — Settings → "Download attachments" must gate the push/NSE path too
+    //
+    // Settings offers Never / Always / a size cap, and the in-app attachment path honors it in three
+    // places (NotificationAttachmentController.swift:39, NotificationAttachmentSectionView.swift:296,343).
+    // attachImageIfNeeded — the path BOTH the app (AppDelegate.swift:177) and the notification service
+    // extension (ntfyNSE/NotificationService.swift:67) use — consulted the policy nowhere, so every image
+    // arriving by push was fetched over the network and persisted regardless of the setting. These tests
+    // assert on whether a request is even ATTEMPTED, which is the actual promise ("Never" = no traffic);
+    // asserting only on the resulting body would pass either way, since a failed download also falls back
+    // to the text summary.
+    //
+    // The `session` seam exists so this is provable offline: RecordingURLProtocol records each request and
+    // fails it immediately, so no test here touches the network. The Always/under-cap cases are controls —
+    // they must show a request ATTEMPTED, which is what makes the "no request" assertions meaningful.
+
+    /// Records every request the download session starts, then fails it — so a test can prove a
+    /// download was or wasn't attempted without any network access.
+    private final class RecordingURLProtocol: URLProtocol {
+        private static let lock = NSLock()
+        private static var recorded: [URL] = []
+
+        static var requestedUrls: [URL] {
+            lock.lock(); defer { lock.unlock() }
+            return recorded
+        }
+
+        static func reset() {
+            lock.lock(); defer { lock.unlock() }
+            recorded = []
+        }
+
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+        override func startLoading() {
+            if let url = request.url {
+                RecordingURLProtocol.lock.lock()
+                RecordingURLProtocol.recorded.append(url)
+                RecordingURLProtocol.lock.unlock()
+            }
+            client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
+        }
+
+        override func stopLoading() {}
+    }
+
+    private func recordingSession() -> URLSession {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [RecordingURLProtocol.self]
+        return URLSession(configuration: config)
+    }
+
+    /// The auto-download preference is process-global (Core Data via Store.shared), so restore the
+    /// default after each test rather than leaking a policy into whatever runs next.
+    private func setAutoDownloadPolicy(_ maxSize: Int64) {
+        Store.shared.saveAttachmentAutoDownloadMaxSize(maxSize)
+        addTeardownBlock {
+            Store.shared.saveAttachmentAutoDownloadMaxSize(Store.autoDownloadDefault)
+        }
+    }
+
+    private func imageAttachmentMessage(size: Int64?, expires: Int64? = nil,
+                                        type: String? = "image/png",
+                                        url: String = "https://ntfy.sh/file/shot.png") -> Message {
+        let attachment = MessageAttachment(name: "shot.png", type: type, size: size, expires: expires, url: url)
+        return Message(id: "att1", time: 1, event: "message", topic: "mytopic",
+                       message: "body", title: "T", attachment: attachment)
+    }
+
+    @discardableResult
+    private func runAttachImage(_ message: Message) -> UNMutableNotificationContent {
+        RecordingURLProtocol.reset()
+        let content = UNMutableNotificationContent()
+        let done = expectation(description: "attachImageIfNeeded calls its completion handler")
+        content.attachImageIfNeeded(message: message, user: nil, session: recordingSession()) {
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 5)
+        return content
+    }
+
+    func testAttachImageSkipsDownloadWhenPolicyIsNever() {
+        setAutoDownloadPolicy(Store.autoDownloadNever)
+        runAttachImage(imageAttachmentMessage(size: 1024))
+        XCTAssertEqual(RecordingURLProtocol.requestedUrls, [],
+                       "\"Never\" must mean no attachment traffic at all on the push path")
+    }
+
+    func testAttachImageSkipsDownloadWhenAttachmentExceedsMaxSize() {
+        setAutoDownloadPolicy(Store.autoDownload100KB)
+        runAttachImage(imageAttachmentMessage(size: 5 * 1024 * 1024))
+        XCTAssertEqual(RecordingURLProtocol.requestedUrls, [],
+                       "a 5 MB attachment must not be fetched under a 100 KB cap")
+    }
+
+    func testAttachImageSkipsDownloadForExpiredAttachment() {
+        setAutoDownloadPolicy(Store.autoDownloadAlways)
+        // Expired server-side: the bytes are gone, so the fetch can only waste a request and fail.
+        let expired = imageAttachmentMessage(size: 1024, expires: 1)
+        runAttachImage(expired)
+        XCTAssertEqual(RecordingURLProtocol.requestedUrls, [],
+                       "an expired attachment must not be fetched even under \"Always\"")
+    }
+
+    func testAttachImageDownloadsWhenPolicyIsAlways() {
+        // CONTROL: proves the recorder sees a real attempt, so the "no request" assertions above mean something.
+        setAutoDownloadPolicy(Store.autoDownloadAlways)
+        runAttachImage(imageAttachmentMessage(size: 5 * 1024 * 1024))
+        XCTAssertEqual(RecordingURLProtocol.requestedUrls.map(\.absoluteString),
+                       ["https://ntfy.sh/file/shot.png"],
+                       "\"Always\" must still fetch, regardless of size")
+    }
+
+    func testAttachImageDownloadsWhenAttachmentIsUnderMaxSize() {
+        // CONTROL: the cap must gate on size, not disable downloading outright.
+        setAutoDownloadPolicy(Store.autoDownload100KB)
+        runAttachImage(imageAttachmentMessage(size: 50 * 1024))
+        XCTAssertEqual(RecordingURLProtocol.requestedUrls.map(\.absoluteString),
+                       ["https://ntfy.sh/file/shot.png"],
+                       "a 50 KB attachment is under the 100 KB cap and must still be fetched")
+    }
+
+    func testAttachImageDownloadsWhenAttachmentSizeIsUnknown() {
+        // CONTROL + documented parity gap: with no server-declared size, Store.shouldAutoDownloadAttachment
+        // returns true, matching the in-app path. The in-app path then aborts mid-flight via
+        // DownloadDelegate(maxSize:); this path has no such abort. Pinning it here so the gap is a
+        // deliberate, visible decision rather than an accident.
+        setAutoDownloadPolicy(Store.autoDownload100KB)
+        runAttachImage(imageAttachmentMessage(size: nil))
+        XCTAssertEqual(RecordingURLProtocol.requestedUrls.map(\.absoluteString),
+                       ["https://ntfy.sh/file/shot.png"])
+    }
+
+    func testAttachImageNeverDownloadsNonImageAttachment() {
+        // CONTROL: pre-existing guard, must survive the policy gate.
+        setAutoDownloadPolicy(Store.autoDownloadAlways)
+        runAttachImage(imageAttachmentMessage(size: 1024, type: "application/pdf",
+                                              url: "https://ntfy.sh/file/doc.pdf"))
+        XCTAssertEqual(RecordingURLProtocol.requestedUrls, [])
+    }
+
+    func testAttachImageStillSummarizesSkippedAttachmentInBody() {
+        // Skipping the download must not silently drop the attachment from the notification: the user
+        // still gets the name/size line, which is the same fallback a failed download produces.
+        setAutoDownloadPolicy(Store.autoDownloadNever)
+        let content = runAttachImage(imageAttachmentMessage(size: 1024))
+        XCTAssertTrue(content.body.contains("Attachment: shot.png"),
+                      "expected an attachment summary in the body, got: \(content.body)")
+        XCTAssertEqual(content.attachments.count, 0)
+    }
+
     // MARK: EmojiManager — every gemoji alias must resolve, not just the first
     //
     // The bundled emojis.json is gemoji, where an emoji may carry several aliases
