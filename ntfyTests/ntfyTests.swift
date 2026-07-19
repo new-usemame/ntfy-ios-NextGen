@@ -531,6 +531,153 @@ final class ntfyTests: XCTestCase {
         XCTAssertEqual(content.attachments.count, 0)
     }
 
+    // MARK: ApiService.checkAuth — must ALWAYS call its completion handler (ntfy #999)
+    //
+    // "Add subscription" sets `loading = true` and only ever clears it from inside this
+    // completion handler (SubscriptionAddView.swift:153/171/174 and :180/194/197). So any
+    // path through checkAuth that returns WITHOUT calling the handler leaves the Subscribe
+    // button as a permanent spinner: no error, no dismissal, sheet unusable until force-quit.
+    //
+    // The reachable path is an unparseable URL. isAddViewValid() only requires the base URL
+    // to match `^https?://.+`, and normalizeBaseUrl() trims only the OUTER whitespace — so an
+    // INTERNAL space ("https://my server.com", a realistic paste/typo for a self-hosted
+    // server) passes validation, then makes URL(string:) return nil inside checkAuth.
+    //
+    // These tests assert the handler FIRES (and fires exactly once). Asserting on the result
+    // value alone would be a fake test: a never-invoked handler trivially never produces a
+    // wrong value. The invalid-URL cases need no network at all — checkAuth returns before it
+    // builds a session — and the rest use the `session` seam so nothing here touches the wire.
+
+    /// Base URLs that pass `isAddViewValid()`'s `^https?://.+` but that `URL(string:)` rejects.
+    private static let unparseableButValidatedBaseUrls = [
+        "https://my server.com",   // internal space — the realistic typo/paste
+        "https://bad|host.com",    // pipe is not a legal URL character
+    ]
+
+    private func checkAuthResult(baseUrl: String, topic: String = "mytopic",
+                                 session: URLSession? = nil) -> AuthResult? {
+        let done = expectation(description: "checkAuth calls its completion handler")
+        var result: AuthResult?
+        var callCount = 0
+        ApiService.shared.checkAuth(baseUrl: baseUrl, topic: topic, user: nil, session: session) { r in
+            callCount += 1
+            result = r
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 5)
+        XCTAssertEqual(callCount, 1, "completion handler must fire exactly once")
+        return result
+    }
+
+    func testCheckAuthCallsHandlerForUnparseableUrl() {
+        // RED before the fix: `guard let url = ... else { return }` drops the handler on the
+        // floor, so the expectation times out and the Subscribe spinner would hang forever.
+        for baseUrl in Self.unparseableButValidatedBaseUrls {
+            guard let result = checkAuthResult(baseUrl: baseUrl) else {
+                XCTFail("no result for \(baseUrl)")
+                continue
+            }
+            guard case .Error = result else {
+                return XCTFail("expected .Error for unparseable \(baseUrl), got \(result)")
+            }
+        }
+    }
+
+    func testUnparseableBaseUrlsGenuinelyPassAppValidation() {
+        // Pins the premise of the bug: these really are reachable from the Add-subscription
+        // sheet. If validation ever tightens, this fails and tells the next reader why.
+        for baseUrl in Self.unparseableButValidatedBaseUrls {
+            XCTAssertNotNil(baseUrl.range(of: "^https?://.+", options: .regularExpression),
+                            "\(baseUrl) should pass isAddViewValid()'s regex")
+            XCTAssertEqual(normalizeBaseUrl(baseUrl), baseUrl,
+                           "normalizeBaseUrl must not rescue \(baseUrl)")
+            XCTAssertNil(URL(string: topicAuthUrl(baseUrl: baseUrl, topic: "mytopic")),
+                         "\(baseUrl) should be unparseable, otherwise this bug isn't reachable")
+        }
+    }
+
+    func testCheckAuthCallsHandlerForBodylessSuccessResponse() {
+        // Defence in depth for the missing terminal `else`: a 200 with no decodable body must
+        // still resolve the handler rather than silently falling off the end of the chain.
+        let result = checkAuthResult(baseUrl: "https://ntfy.sh",
+                                     session: StubURLProtocol.session(status: 200, body: Data()))
+        guard case .Error = result else {
+            return XCTFail("expected .Error for a bodyless 200, got \(String(describing: result))")
+        }
+    }
+
+    // Controls — these pass BOTH before and after the fix. They pin the exact axis under test
+    // (handler-always-fires) and prove the change didn't alter normal auth outcomes.
+
+    func testCheckAuthUnauthorizedControl() {
+        let result = checkAuthResult(baseUrl: "https://ntfy.sh",
+                                     session: StubURLProtocol.session(status: 401, body: Data()))
+        guard case .Unauthorized = result else {
+            return XCTFail("expected .Unauthorized for 401, got \(String(describing: result))")
+        }
+    }
+
+    func testCheckAuthSuccessControl() {
+        let body = #"{"success":true}"#.data(using: .utf8)!
+        let result = checkAuthResult(baseUrl: "https://ntfy.sh",
+                                     session: StubURLProtocol.session(status: 200, body: body))
+        guard case .Success = result else {
+            return XCTFail("expected .Success, got \(String(describing: result))")
+        }
+    }
+
+    func testCheckAuthTransportErrorControl() {
+        let result = checkAuthResult(baseUrl: "https://ntfy.sh",
+                                     session: StubURLProtocol.session(failWith: URLError(.notConnectedToInternet)))
+        guard case .Error = result else {
+            return XCTFail("expected .Error for a transport failure, got \(String(describing: result))")
+        }
+    }
+
+    /// Serves a canned HTTP response (or a canned failure) so auth outcomes are provable offline.
+    private final class StubURLProtocol: URLProtocol {
+        private static let lock = NSLock()
+        private static var status = 200
+        private static var body = Data()
+        private static var failure: Error?
+
+        static func session(status: Int = 200, body: Data = Data(), failWith error: Error? = nil) -> URLSession {
+            lock.lock()
+            self.status = status
+            self.body = body
+            self.failure = error
+            lock.unlock()
+            let config = URLSessionConfiguration.ephemeral
+            config.protocolClasses = [StubURLProtocol.self]
+            return URLSession(configuration: config)
+        }
+
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+        override func startLoading() {
+            StubURLProtocol.lock.lock()
+            let status = StubURLProtocol.status
+            let body = StubURLProtocol.body
+            let failure = StubURLProtocol.failure
+            StubURLProtocol.lock.unlock()
+
+            if let failure = failure {
+                client?.urlProtocol(self, didFailWithError: failure)
+                return
+            }
+            let response = HTTPURLResponse(url: request.url!, statusCode: status,
+                                           httpVersion: "HTTP/1.1", headerFields: nil)!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            if !body.isEmpty {
+                client?.urlProtocol(self, didLoad: body)
+            }
+            client?.urlProtocolDidFinishLoading(self)
+        }
+
+        override func stopLoading() {}
+    }
+
     // MARK: EmojiManager — every gemoji alias must resolve, not just the first
     //
     // The bundled emojis.json is gemoji, where an emoji may carry several aliases

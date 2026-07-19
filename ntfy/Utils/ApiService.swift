@@ -81,11 +81,19 @@ class ApiService {
         }.resume()
     }
     
-    func checkAuth(baseUrl: String, topic: String, user: BasicUser?, completionHandler: @escaping(AuthResult) -> Void) {
-        guard let url = URL(string: topicAuthUrl(baseUrl: baseUrl, topic: topic)) else { return }
+    func checkAuth(baseUrl: String, topic: String, user: BasicUser?, session: URLSession? = nil, completionHandler: @escaping(AuthResult) -> Void) {
+        // Every exit from this method must call completionHandler: "Add subscription" clears its
+        // loading spinner only from the handler, so dropping it hangs the sheet with no error.
+        // A base URL can reach here unparseable — isAddViewValid() only checks `^https?://.+`,
+        // which accepts e.g. an internal space ("https://my server.com") that URL(string:) rejects.
+        guard let url = URL(string: topicAuthUrl(baseUrl: baseUrl, topic: topic)) else {
+            Log.e(tag, "Cannot build auth URL for baseUrl=\(baseUrl), topic=\(topic)")
+            completionHandler(.Error("Invalid server URL"))
+            return
+        }
         let request = newRequest(url: url, user: user)
         Log.d(tag, "Checking auth for \(url) with user \(user?.username ?? "anonymous")")
-        newSession(timeout: 10).dataTask(with: request) { (data, response, error) in
+        (session ?? newSession(timeout: 10)).dataTask(with: request) { (data, response, error) in
             if let error = error {
                 Log.e(self.tag, "Error checking auth: \(error)")
                 completionHandler(.Error(error.localizedDescription))
@@ -108,6 +116,12 @@ class ApiService {
                     Log.e(self.tag, "Error handling auth response: \(error)")
                     completionHandler(.Error("Unexpected response from server. Is this a ntfy server?"))
                 }
+            } else {
+                // Not reached today (URLSession hands back empty Data, not nil, for a bodyless
+                // response), but the chain above had no terminal branch — so any future shape
+                // that satisfies none of them would silently hang the sheet. Fail loudly instead.
+                Log.e(self.tag, "Auth check produced no error, no HTTP status and no data")
+                completionHandler(.Error("Unexpected response from server"))
             }
         }.resume()
     }
