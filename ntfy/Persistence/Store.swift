@@ -107,12 +107,22 @@ class Store: ObservableObject {
     // MARK: Subscriptions
     
     func saveSubscription(baseUrl: String, topic: String) -> Subscription {
-        let subscription = Subscription(context: context)
-        subscription.baseUrl = normalizeBaseUrl(baseUrl)
-        subscription.topic = topic
-        DispatchQueue.main.sync {
+        // `context` is the container's viewContext (main-queue concurrency), so the insert and the save
+        // must both run on its queue. Doing only the save under `DispatchQueue.main.sync` left the
+        // `Subscription(context:)` insert on the caller's thread — which silently lost the row when the
+        // caller was a background queue — and deadlocked outright when the caller was already main.
+        // `performAndWait` fixes both: it hops to the context's queue and is reentrant-safe from it.
+        var subscription: Subscription!
+        context.performAndWait {
+            subscription = Subscription(context: context)
+            subscription.baseUrl = normalizeBaseUrl(baseUrl)
+            subscription.topic = topic
             Log.d(Store.tag, "Storing subscription baseUrl=\(subscription.baseUrl ?? "?"), topic=\(topic)")
-            try? context.save()
+            do {
+                try context.save()
+            } catch let error {
+                Log.w(Store.tag, "Cannot store subscription", error)
+            }
         }
         return subscription
     }
@@ -248,15 +258,19 @@ class Store: ObservableObject {
     // MARK: Users
     
     func saveUser(baseUrl: String, username: String, password: String) {
-        do {
-            let user = getUser(baseUrl: baseUrl) ?? User(context: context)
-            user.baseUrl = normalizeBaseUrl(baseUrl)
-            user.username = username
-            user.password = password
-            try context.save()
-        } catch let error {
-            Log.w(Store.tag, "Cannot store user", error)
-            rollbackAndRefresh()
+        // Same main-queue contract as saveSubscription: the Add-subscription login path calls this from
+        // a URLSession completion, so the fetch/insert/save must be hopped onto the context's queue.
+        context.performAndWait {
+            do {
+                let user = getUser(baseUrl: baseUrl) ?? User(context: context)
+                user.baseUrl = normalizeBaseUrl(baseUrl)
+                user.username = username
+                user.password = password
+                try context.save()
+            } catch let error {
+                Log.w(Store.tag, "Cannot store user", error)
+                rollbackAndRefresh()
+            }
         }
     }
     

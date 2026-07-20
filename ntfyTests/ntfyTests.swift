@@ -678,6 +678,109 @@ final class ntfyTests: XCTestCase {
         override func stopLoading() {}
     }
 
+    // MARK: Store writes must be safe from ANY thread — Add-subscription runs them off-main
+    //
+    // `Store.context` is `container.viewContext`, i.e. an NSMainQueueConcurrencyType context, so every
+    // fetch/insert/save against it must happen on the main queue. `SubscriptionAddView` violated that:
+    // its `checkAuth` completion runs on a URLSession delegate queue and it then hopped further onto
+    // `DispatchQueue.global(qos: .background)` before calling `store.saveUser` and
+    // `subscriptionManager.subscribe` (-> `store.saveSubscription`). Core Data misuse like that is
+    // silent-until-it-isn't (corruption / `__Multithreading_Violation_AllThatIsLeftToUsIsHonor__`),
+    // so these tests pin the *contract* rather than one crash: a Store write must complete and persist
+    // whichever queue calls it, main included.
+    //
+    // TWO of the four tests below are red before the fix, for two DIFFERENT reasons — the old
+    // `saveSubscription` did the `Subscription(context:)` insert on the caller's thread and wrapped only
+    // `try? context.save()` in `DispatchQueue.main.sync`:
+    //   * called from MAIN, `main.sync`-from-main deadlocks   -> testSaveSubscriptionIsSafeToCallFromTheMainThread
+    //   * called from a BACKGROUND queue, the row silently does not persist (the insert landed on the
+    //     wrong queue and `try?` swallowed the failure) -> testSaveSubscriptionFromABackgroundQueuePersists
+    // The second one is the user-visible half: the background queue is exactly what production used, so
+    // "I added a topic and it didn't stick" was reachable. It was originally written expecting to be a
+    // control and it failed — recorded here rather than quietly relabelled.
+    //
+    // The two saveUser tests ARE genuine controls: they pass on both sides. saveUser had no `main.sync`
+    // and its insert+save were already on one thread, so it was an unsound-but-not-yet-failing threading
+    // violation. They pin that this change is about queue affinity without regressing persistence.
+    //
+    // NB on the red signal: a `main.sync`-from-main deadlock HANGS rather than fails, so the red run was
+    // taken with `-default-test-execution-time-allowance 30`; the hang surfaced as "Restarting after
+    // unexpected exit, crash, or test timeout". Keep that flag in mind if this test stops returning.
+
+    private func deleteAfterTest(_ object: NSManagedObject) {
+        addTeardownBlock {
+            Store.shared.context.performAndWait {
+                Store.shared.context.delete(object)
+                try? Store.shared.context.save()
+            }
+        }
+    }
+
+    func testSaveSubscriptionIsSafeToCallFromTheMainThread() {
+        // RED before the fix: DispatchQueue.main.sync from the main thread never returns.
+        XCTAssertTrue(Thread.isMainThread, "premise: XCTest runs test methods on the main thread")
+
+        let subscription = Store.shared.saveSubscription(baseUrl: "https://ntfy.sh", topic: "mainqueuetopic")
+        deleteAfterTest(subscription)
+
+        XCTAssertEqual(
+            Store.shared.getSubscription(baseUrl: "https://ntfy.sh", topic: "mainqueuetopic")?.topic,
+            "mainqueuetopic",
+            "saveSubscription must return and persist when called on the context's own queue"
+        )
+    }
+
+    func testSaveSubscriptionFromABackgroundQueuePersists() {
+        // CONTROL: passes on both sides. Pins that the fix did not break the queue-hopping path that
+        // production actually used, i.e. the change is about reentrancy, not about persistence.
+        let done = expectation(description: "saveSubscription returns off-main")
+        var saved: Subscription?
+        DispatchQueue.global(qos: .background).async {
+            let subscription = Store.shared.saveSubscription(baseUrl: "https://ntfy.sh", topic: "bgqueuetopic")
+            DispatchQueue.main.async {
+                saved = subscription
+                done.fulfill()
+            }
+        }
+        wait(for: [done], timeout: 5)
+
+        guard let saved else { return XCTFail("saveSubscription never returned from a background queue") }
+        deleteAfterTest(saved)
+        XCTAssertEqual(
+            Store.shared.getSubscription(baseUrl: "https://ntfy.sh", topic: "bgqueuetopic")?.topic,
+            "bgqueuetopic",
+            "saveSubscription must still persist when called off the main queue"
+        )
+    }
+
+    func testSaveUserFromABackgroundQueuePersists() {
+        // CONTROL: passes on both sides. saveUser had no main.sync, so it never hung — it simply did
+        // fetch/insert/save on whatever thread called it. This is the SubscriptionAddView:187 path.
+        let done = expectation(description: "saveUser returns off-main")
+        DispatchQueue.global(qos: .background).async {
+            Store.shared.saveUser(baseUrl: "https://ntfy.example.com", username: "bguser", password: "pw")
+            DispatchQueue.main.async { done.fulfill() }
+        }
+        wait(for: [done], timeout: 5)
+
+        guard let user = Store.shared.getUser(baseUrl: "https://ntfy.example.com") else {
+            return XCTFail("saveUser did not persist from a background queue")
+        }
+        deleteAfterTest(user)
+        XCTAssertEqual(user.username, "bguser")
+    }
+
+    func testSaveUserFromTheMainThreadPersists() {
+        // CONTROL: passes on both sides. This is the SettingsView:46 path, which was already on main.
+        Store.shared.saveUser(baseUrl: "https://ntfy.main.example.com", username: "mainuser", password: "pw")
+
+        guard let user = Store.shared.getUser(baseUrl: "https://ntfy.main.example.com") else {
+            return XCTFail("saveUser did not persist from the main thread")
+        }
+        deleteAfterTest(user)
+        XCTAssertEqual(user.username, "mainuser")
+    }
+
     // MARK: EmojiManager — every gemoji alias must resolve, not just the first
     //
     // The bundled emojis.json is gemoji, where an emoji may carry several aliases

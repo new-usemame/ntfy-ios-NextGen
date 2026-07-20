@@ -153,25 +153,27 @@ struct SubscriptionAddView: View {
         loading = true
         addError = nil
         let user = store.getUser(baseUrl: selectedBaseUrl)?.toBasicUser()
+        // checkAuth's handler runs on a URLSession delegate queue, so everything below — SwiftUI @State
+        // writes and Core Data through subscriptionManager/store — has to be hopped onto main.
         ApiService.shared.checkAuth(baseUrl: selectedBaseUrl, topic: sanitizedTopic, user: user) { result in
-            switch result {
-            case .Success:
-                DispatchQueue.global(qos: .background).async {
+            DispatchQueue.main.async {
+                switch result {
+                case .Success:
                     subscriptionManager.subscribe(baseUrl: selectedBaseUrl, topic: sanitizedTopic)
                     resetAndHide()
+                    // Do not reset "loading", because resetAndHide() will do that after everything is done
+                case .Unauthorized:
+                    if let user = user {
+                        addError = "User \(user.username) is not authorized to read this topic"
+                    } else {
+                        addError = nil // Reset
+                        showLogin = true
+                    }
+                    loading = false
+                case .Error(let err):
+                    addError = err
+                    loading = false
                 }
-                // Do not reset "loading", because resetAndHide() will do that after everything is done
-            case .Unauthorized:
-                if let user = user {
-                    addError = "User \(user.username) is not authorized to read this topic"
-                } else {
-                    addError = nil // Reset
-                    showLogin = true
-                }
-                loading = false
-            case .Error(let err):
-                addError = err
-                loading = false
             }
         }
     }
@@ -180,21 +182,22 @@ struct SubscriptionAddView: View {
         loading = true
         loginError = nil
         let user = BasicUser(username: username, password: password)
+        // See subscribeOrShowLoginAction: the handler is off-main, so hop before touching @State or Core Data.
         ApiService.shared.checkAuth(baseUrl: selectedBaseUrl, topic: sanitizedTopic, user: user) { result in
-            switch result {
-            case .Success:
-                DispatchQueue.global(qos: .background).async {
+            DispatchQueue.main.async {
+                switch result {
+                case .Success:
                     store.saveUser(baseUrl: selectedBaseUrl, username: username, password: password)
                     subscriptionManager.subscribe(baseUrl: selectedBaseUrl, topic: sanitizedTopic)
                     resetAndHide()
+                    // Do not reset "loading", because resetAndHide() will do that after everything is done
+                case .Unauthorized:
+                    loginError = "Invalid credentials, or user \(username) is not authorized to read this topic"
+                    loading = false
+                case .Error(let err):
+                    loginError = err
+                    loading = false
                 }
-                // Do not reset "loading", because resetAndHide() will do that after everything is done
-            case .Unauthorized:
-                loginError = "Invalid credentials, or user \(username) is not authorized to read this topic"
-                loading = false
-            case .Error(let err):
-                loginError = err
-                loading = false
             }
         }
     }
