@@ -59,11 +59,12 @@ struct SubscriptionManager {
                 completionHandler([])
                 return
             }
-            Log.d(tag, "Polling success, \(messages.count) new message(s)", messages)
-            if !messages.isEmpty {
-                store.save(notificationsFromMessages: messages, withSubscription: subscription)
-            }
-            completionHandler(messages)
+            // Report only what was actually stored. Overlapping polls share a `since` cursor (it is read
+            // per-request in ApiService.poll), so the server routinely re-delivers messages we already
+            // have — notifying for those re-alerts the user about a message they have already seen.
+            let newMessages = store.save(notificationsFromMessages: messages, withSubscription: subscription)
+            Log.d(tag, "Polling success, \(messages.count) message(s), \(newMessages.count) new", newMessages)
+            completionHandler(newMessages)
         }
     }
 }
