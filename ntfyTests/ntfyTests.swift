@@ -781,6 +781,114 @@ final class ntfyTests: XCTestCase {
         XCTAssertEqual(user.username, "mainuser")
     }
 
+    // MARK: A poll must report only NEWLY-STORED messages — repeat alerts (ntfy #1111 "ghost messages")
+    //
+    // `Store.saveNotifications` already computes the answer: it fetches the existing rows for the
+    // incoming ids and inserts only `messages.filter { !existingIDs.contains($0.id) }`. But
+    // `save(notificationsFromMessages:)` returned Void, so `SubscriptionManager.poll` handed its
+    // completion handler the RAW server response, and `AppDelegate.showNotificationsSequentially`
+    // (the background `~poll` wakeup, AppDelegate:140) posted one local notification per element of
+    // that raw list. The store knew which messages were new; the notification layer never asked.
+    //
+    // The overlap is reachable in production because `since` is read per-request: `ApiService.poll`
+    // builds `?poll=1&since=\(subscription.lastNotificationId ?? "all")` at request time, and four
+    // call sites can have a poll in flight simultaneously (AppDelegate:134 background wakeup,
+    // NotificationListView:40 onAppear, :256 after publish, SubscriptionListView:88). Two overlapping
+    // polls therefore compute the SAME `since`, receive the SAME messages, and the second inserts
+    // nothing — yet still re-notifies for every message. Because the banner is added with
+    // `UNNotificationRequest(identifier: message.id, ...)`, iOS REPLACES the delivered notification
+    // rather than stacking it, so the symptom is a repeated alert (banner + sound) for a message the
+    // user already saw, not a duplicated row. `didReceiveNewData` (AppDelegate:136) was wrong for the
+    // same reason: an all-duplicate poll reported `.newData` and kept spending the refresh budget.
+    //
+    // RED technique (per the ledger): the return value was added FIRST returning `messages`
+    // unfiltered — reproducing today's behavior exactly — so the two tests below fail BEHAVIORALLY
+    // rather than failing to compile. The two controls pass on both sides and pin the axis: this
+    // change is about what the poll REPORTS, not about what it stores.
+
+    private func deleteNotificationsAfterTest(ids: [String]) {
+        addTeardownBlock {
+            Store.shared.context.performAndWait {
+                let request = Notification.fetchRequest()
+                request.predicate = NSPredicate(format: "id IN %@", ids)
+                for object in (try? Store.shared.context.fetch(request)) ?? [] {
+                    Store.shared.context.delete(object)
+                }
+                try? Store.shared.context.save()
+            }
+        }
+    }
+
+    private func pollMessage(_ id: String, topic: String) -> Message {
+        Message(id: id, time: 1, event: "message", topic: topic, message: "body-\(id)", title: nil)
+    }
+
+    func testASecondPollOfTheSameMessagesReportsNothingNew() {
+        // RED before the fix: returned both messages again, so the background wakeup re-alerted both.
+        let topic = "polldedupe-repeat"
+        let subscription = Store.shared.saveSubscription(baseUrl: "https://ntfy.sh", topic: topic)
+        deleteAfterTest(subscription)
+        let messages = [pollMessage("dedupe-a1", topic: topic), pollMessage("dedupe-a2", topic: topic)]
+        deleteNotificationsAfterTest(ids: messages.map(\.id))
+
+        let first = Store.shared.save(notificationsFromMessages: messages, withSubscription: subscription)
+        XCTAssertEqual(first.map(\.id), ["dedupe-a1", "dedupe-a2"], "premise: a first poll reports both messages")
+
+        let second = Store.shared.save(notificationsFromMessages: messages, withSubscription: subscription)
+        XCTAssertEqual(second.map(\.id), [], "a re-poll of already-stored messages must report nothing to notify about")
+    }
+
+    func testAnOverlappingPollReportsOnlyTheUnseenMessages() {
+        // RED before the fix: reported the already-seen message alongside the genuinely new one.
+        let topic = "polldedupe-overlap"
+        let subscription = Store.shared.saveSubscription(baseUrl: "https://ntfy.sh", topic: topic)
+        deleteAfterTest(subscription)
+        let seen = pollMessage("dedupe-b1", topic: topic)
+        let fresh = pollMessage("dedupe-b2", topic: topic)
+        deleteNotificationsAfterTest(ids: [seen.id, fresh.id])
+
+        _ = Store.shared.save(notificationsFromMessages: [seen], withSubscription: subscription)
+        let overlapping = Store.shared.save(notificationsFromMessages: [seen, fresh], withSubscription: subscription)
+
+        XCTAssertEqual(
+            overlapping.map(\.id), ["dedupe-b2"],
+            "a poll whose window overlaps stored messages must report only the ones it actually stored"
+        )
+    }
+
+    func testAFirstPollReportsEveryMessage() {
+        // CONTROL: passes on both sides. Pins that the filter does not over-reject — a genuine first
+        // poll must still notify for everything, which is the whole point of the background wakeup.
+        let topic = "polldedupe-first"
+        let subscription = Store.shared.saveSubscription(baseUrl: "https://ntfy.sh", topic: topic)
+        deleteAfterTest(subscription)
+        let messages = [pollMessage("dedupe-c1", topic: topic), pollMessage("dedupe-c2", topic: topic)]
+        deleteNotificationsAfterTest(ids: messages.map(\.id))
+
+        let reported = Store.shared.save(notificationsFromMessages: messages, withSubscription: subscription)
+        XCTAssertEqual(reported.map(\.id), ["dedupe-c1", "dedupe-c2"])
+    }
+
+    func testADeduplicatedPollStillAdvancesLastNotificationId() {
+        // CONTROL: passes on both sides. `saveNotifications`' early-return branch advances
+        // `lastNotificationId` even when it inserts nothing, so the next poll's `since` moves forward.
+        // Reporting fewer messages must not regress that — otherwise the same window is re-fetched
+        // forever and the repeat-alert bug comes back by a different route.
+        let topic = "polldedupe-since"
+        let subscription = Store.shared.saveSubscription(baseUrl: "https://ntfy.sh", topic: topic)
+        deleteAfterTest(subscription)
+        let messages = [pollMessage("dedupe-d1", topic: topic), pollMessage("dedupe-d2", topic: topic)]
+        deleteNotificationsAfterTest(ids: messages.map(\.id))
+
+        _ = Store.shared.save(notificationsFromMessages: messages, withSubscription: subscription)
+        _ = Store.shared.save(notificationsFromMessages: messages, withSubscription: subscription)
+
+        XCTAssertEqual(
+            subscription.lastNotificationId, "dedupe-d2",
+            "an all-duplicate poll must still advance the since-cursor to the last message it saw"
+        )
+    }
+
     // MARK: EmojiManager — every gemoji alias must resolve, not just the first
     //
     // The bundled emojis.json is gemoji, where an emoji may carry several aliases

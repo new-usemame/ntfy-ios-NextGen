@@ -199,17 +199,24 @@ class Store: ObservableObject {
         return didSave
     }
 
-    func save(notificationsFromMessages messages: [Message], withSubscription subscription: Subscription) {
-        guard !messages.isEmpty else { return }
+    /// Stores `messages` and returns only the ones that were actually inserted, i.e. the messages the
+    /// user has not been notified about yet. Callers that alert the user (the background `~poll`
+    /// wakeup) must notify for the returned messages, never for the raw server response — overlapping
+    /// polls share a `since` cursor and routinely re-deliver already-stored messages.
+    @discardableResult
+    func save(notificationsFromMessages messages: [Message], withSubscription subscription: Subscription) -> [Message] {
+        guard !messages.isEmpty else { return [] }
 
+        var newMessages: [Message] = []
         context.performAndWait {
             do {
-                try saveNotifications(messages, withSubscription: subscription)
+                newMessages = try saveNotifications(messages, withSubscription: subscription)
             } catch let error {
                 Log.w(Store.tag, "Cannot store notifications (fromMessages)", error)
                 rollbackAndRefresh()
             }
         }
+        return newMessages
     }
     
     func delete(notification: Notification) {
@@ -459,7 +466,10 @@ class Store: ObservableObject {
         return try context.fetch(request).first
     }
 
-    private func saveNotifications(_ messages: [Message], withSubscription subscription: Subscription) throws {
+    /// Inserts the messages that are not already stored and returns exactly those, so callers can tell
+    /// a genuinely new message from one an overlapping poll re-delivered.
+    @discardableResult
+    private func saveNotifications(_ messages: [Message], withSubscription subscription: Subscription) throws -> [Message] {
         let ids = messages.map(\.id)
         let existingRequest = Notification.fetchRequest()
         existingRequest.predicate = NSPredicate(format: "id IN %@", ids)
@@ -472,7 +482,7 @@ class Store: ObservableObject {
                 subscription.lastNotificationId = lastMessage.id
                 try context.save()
             }
-            return
+            return []
         }
 
         for message in newMessages {
@@ -513,6 +523,7 @@ class Store: ObservableObject {
         }
         subscription.lastNotificationId = messages.last?.id
         try context.save()
+        return newMessages
     }
 
     private func deleteAttachmentLocalFile(for notification: Notification) {
