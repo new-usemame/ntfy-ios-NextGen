@@ -37,8 +37,19 @@ class NotificationsObservable: NSObject, ObservableObject {
 
 extension NotificationsObservable: NSFetchedResultsControllerDelegate {
     func controllerDidChangeContent(_ controller: NSFetchedResultsController<NSFetchRequestResult>) {
-        DispatchQueue.main.async {
-            self.notifications = self.fetchedResultsController.fetchedObjects ?? []
+        // The published array must never outlive the rows it points at. This delegate already runs on the
+        // context's own queue — the main queue, since `Store.context` is the container's viewContext — so
+        // republishing through `DispatchQueue.main.async` deferred the update by a whole runloop turn. For
+        // that turn `notifications` still held a just-deleted Notification, while the save had already told
+        // SwiftUI that the row's `@ObservedObject` changed; `NotificationRowView` then re-rendered against an
+        // invalidated managed object and faulted. That is ntfy #1058: swipe-deleting one message in a topic
+        // holding two or more kills the app with no error. Reading `fetchedObjects` here rather than inside
+        // the closure also stops a deferred update from publishing a newer fetch than the one it was sent for.
+        let fetched = fetchedResultsController.fetchedObjects ?? []
+        if Thread.isMainThread {
+            notifications = fetched
+        } else {
+            DispatchQueue.main.async { self.notifications = fetched }
         }
     }
 }

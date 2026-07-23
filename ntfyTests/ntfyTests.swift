@@ -889,6 +889,119 @@ final class ntfyTests: XCTestCase {
         )
     }
 
+    // MARK: A deleted notification must leave the published list at once — swipe-delete crash (ntfy #1058)
+    //
+    // `NotificationListView:183` renders `ForEach(notificationsModel.notifications, id: \.self)` and each
+    // `NotificationRowView` binds its row to `@ObservedObject var notification: Notification`. Swiping a row
+    // calls `Store.delete(notification:)`, which deletes AND saves inside `context.performAndWait`, so the
+    // managed object is invalid the moment that call returns. But `NotificationsObservable`
+    // republished through `DispatchQueue.main.async`, so for one full runloop turn `notifications` still
+    // held the dead object while Core Data's save had already told SwiftUI that the row's `@ObservedObject`
+    // changed. The row body is then re-evaluated against an object whose row is gone — `shortDateTime()`,
+    // `priority`, `formatTitle()` and `renderedMessageAttributedString()` all fault — and the process dies
+    // with no alert, which is exactly how ntfy #1058 puts it: "App simply disappears with no error message".
+    //
+    // This also explains the two qualifiers in that report. It needs MORE THAN ONE message because a
+    // surviving sibling row is what keeps the list rendering through the deletion, and "clear all" is safe
+    // because `delete(allNotificationsFor:)` removes every row at once, leaving no row pointed at a dead
+    // object. The fix therefore belongs in the observable, not in the view: the published array must never
+    // outlive the rows it points at.
+    //
+    // The first two tests fail BEHAVIORALLY before the fix (a stale array, not a compile error). The two
+    // after them are CONTROLS that pass on BOTH sides and pin the axis — this change is about what the view
+    // layer OBSERVES, not about whether the delete persists.
+
+    private func makeNotificationsObservableFixture(
+        topic: String,
+        ids: [String]
+    ) -> (subscription: Subscription, observable: NotificationsObservable, published: [ntfy.Notification]) {
+        let subscription = Store.shared.saveSubscription(baseUrl: "https://ntfy.sh", topic: topic)
+        deleteAfterTest(subscription)
+        deleteNotificationsAfterTest(ids: ids)
+        let messages = ids.map { pollMessage($0, topic: topic) }
+        _ = Store.shared.save(notificationsFromMessages: messages, withSubscription: subscription)
+
+        let observable = NotificationsObservable(subscriptionID: subscription.objectID)
+        return (subscription, observable, observable.notifications)
+    }
+
+    func testDeletingOneNotificationRemovesItFromThePublishedListImmediately() {
+        // RED before the fix: the async republish leaves the deleted row in the array for a whole runloop
+        // turn, and that turn is exactly when SwiftUI re-renders the row bound to the dead object.
+        let fixture = makeNotificationsObservableFixture(topic: "swipedelete-immediate",
+                                                        ids: ["swipe-a1", "swipe-a2"])
+        XCTAssertEqual(fixture.published.count, 2, "premise: the observable starts with both notifications")
+        guard let victim = fixture.published.first(where: { $0.id == "swipe-a1" }) else {
+            return XCTFail("premise: fixture did not contain swipe-a1")
+        }
+
+        Store.shared.delete(notification: victim)
+
+        XCTAssertEqual(
+            fixture.observable.notifications.count, 1,
+            "a deleted notification must be gone from the published list as soon as delete() returns"
+        )
+        XCTAssertFalse(
+            fixture.observable.notifications.contains { $0.id == "swipe-a1" },
+            "the published list must not still contain the deleted notification"
+        )
+    }
+
+    func testThePublishedListNeverExposesAnInvalidatedNotification() {
+        // RED before the fix. This is the assertion that maps straight onto the crash: a managed object
+        // whose managedObjectContext is nil has had its row deleted, so reading ANY property of it from a
+        // SwiftUI body faults. It must never be reachable from the array the view renders.
+        let fixture = makeNotificationsObservableFixture(topic: "swipedelete-invalidated",
+                                                        ids: ["swipe-b1", "swipe-b2", "swipe-b3"])
+        XCTAssertEqual(fixture.published.count, 3, "premise: the observable starts with all three")
+        guard let victim = fixture.published.first(where: { $0.id == "swipe-b2" }) else {
+            return XCTFail("premise: fixture did not contain swipe-b2")
+        }
+
+        Store.shared.delete(notification: victim)
+
+        XCTAssertNil(
+            victim.managedObjectContext,
+            "premise: deleting through the store invalidates the managed object right away"
+        )
+        XCTAssertFalse(
+            fixture.observable.notifications.contains { $0.managedObjectContext == nil },
+            "the published list must never hand the view layer an invalidated managed object"
+        )
+    }
+
+    func testDeletingOneNotificationStillLeavesTheOthersStored() {
+        // CONTROL: green on BOTH sides. The delete itself was always correct — `Store.delete(notification:)`
+        // has run inside `context.performAndWait` since PR #23. This pins that the fix is about what the
+        // view layer observes, not about persistence.
+        let ids = ["swipe-c1", "swipe-c2"]
+        let fixture = makeNotificationsObservableFixture(topic: "swipedelete-persistence", ids: ids)
+        guard let victim = fixture.published.first(where: { $0.id == "swipe-c1" }) else {
+            return XCTFail("premise: fixture did not contain swipe-c1")
+        }
+
+        Store.shared.delete(notification: victim)
+
+        let request = Notification.fetchRequest()
+        request.predicate = NSPredicate(format: "id IN %@", ids)
+        let remaining = (try? Store.shared.context.fetch(request)) ?? []
+        XCTAssertEqual(
+            remaining.compactMap(\.id), ["swipe-c2"],
+            "the delete must persist: exactly the untouched notification remains in the store"
+        )
+    }
+
+    func testTheObservablePublishesEveryNotificationForItsSubscription() {
+        // CONTROL: green on BOTH sides. `init` -> `performFetch` is untouched by this fix; if this goes red,
+        // the change broke the observable's normal population path rather than just its refresh path.
+        let fixture = makeNotificationsObservableFixture(topic: "swipedelete-initialfetch",
+                                                        ids: ["swipe-d1", "swipe-d2"])
+        XCTAssertEqual(
+            Set(fixture.observable.notifications.compactMap(\.id)), ["swipe-d1", "swipe-d2"],
+            "the observable must publish every stored notification for its subscription"
+        )
+    }
+
     // MARK: EmojiManager — every gemoji alias must resolve, not just the first
     //
     // The bundled emojis.json is gemoji, where an emoji may carry several aliases
