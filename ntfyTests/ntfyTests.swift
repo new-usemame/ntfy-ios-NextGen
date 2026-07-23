@@ -1064,4 +1064,180 @@ final class ntfyTests: XCTestCase {
         XCTAssertEqual(parseNonEmojiTags("thumbsup"), [])
         XCTAssertEqual(parseNonEmojiTags("thumbsup,backup"), ["backup"])
     }
+
+    // MARK: - FCM subscription reconciliation (ntfy#1305)
+    //
+    // The push path cannot be exercised on the simulator (no APNs, no FCM), so
+    // these pin the *decision* logic behind the FcmTopicSubscriber seam: who we
+    // try to subscribe, when we refuse to try, and what survives a failure.
+
+    /// Records calls and lets a test force a per-topic failure.
+    private final class FakeFcmSubscriber: FcmTopicSubscriber {
+        var hasApnsToken = true
+        private(set) var subscribed: [String] = []
+        private(set) var unsubscribed: [String] = []
+        var failures: [String: Error] = [:]
+
+        struct Boom: Error {}
+
+        func subscribe(toTopic topic: String, completion: @escaping (Error?) -> Void) {
+            subscribed.append(topic)
+            completion(failures[topic])
+        }
+
+        func unsubscribe(fromTopic topic: String, completion: @escaping (Error?) -> Void) {
+            unsubscribed.append(topic)
+            completion(nil)
+        }
+    }
+
+    /// `reconcile` finishes on the main queue, so a test must let it drain
+    /// before asserting or starting another round.
+    private func drainMainQueue() {
+        let drained = expectation(description: "main queue drained")
+        DispatchQueue.main.async { drained.fulfill() }
+        wait(for: [drained], timeout: 2)
+    }
+
+    /// Reuse `Store.shared`, which is already backed by an in-memory store under
+    /// XCTest (see `Store.shared`). Standing up a second `NSPersistentContainer`
+    /// per test loads the model again and makes Core Data log
+    /// "Failed to find a unique match for an NSEntityDescription", so we take the
+    /// one container and wipe the rows instead.
+    private func makeReconciler(
+        _ subscriber: FakeFcmSubscriber
+    ) -> (FcmSubscriptionReconciler, Store, UserDefaults) {
+        let store = Store.shared
+        store.getSubscriptions()?.forEach { store.delete(subscription: $0) }
+        let defaults = UserDefaults(suiteName: "ntfyTests-\(UUID().uuidString)")!
+        let reconciler = FcmSubscriptionReconciler(store: store, subscriber: subscriber, defaults: defaults)
+        return (reconciler, store, defaults)
+    }
+
+    // Without the APNs token, FCM rejects every topic bind. The old code fired
+    // anyway and swallowed the errors — that is the desync this refuses to create.
+    func testReconcileDoesNothingUntilApnsTokenIsAssociated() {
+        let fake = FakeFcmSubscriber()
+        fake.hasApnsToken = false
+        let (reconciler, store, _) = makeReconciler(fake)
+        _ = store.saveSubscription(baseUrl: "https://ntfy.sh", topic: "alerts")
+
+        reconciler.reconcile(reason: "test")
+        drainMainQueue()
+
+        XCTAssertEqual(fake.subscribed, [], "must not attempt a bind before APNs association")
+        XCTAssertEqual(store.getSubscriptionsPendingFcmSubscribe().count, 1, "the subscription stays queued")
+    }
+
+    func testReconcileSubscribesPendingTopicsAndThePollTopic() {
+        let fake = FakeFcmSubscriber()
+        let (reconciler, store, _) = makeReconciler(fake)
+        _ = store.saveSubscription(baseUrl: "https://ntfy.sh", topic: "alerts")
+
+        reconciler.reconcile(reason: "test")
+        drainMainQueue()
+
+        XCTAssertTrue(fake.subscribed.contains(FcmSubscriptionReconciler.pollTopic))
+        XCTAssertTrue(fake.subscribed.contains("alerts"))
+        XCTAssertTrue(store.getSubscriptionsPendingFcmSubscribe().isEmpty,
+                      "a confirmed bind must clear the retry queue")
+    }
+
+    // Reconciling repeatedly is the whole safety model (it runs on every
+    // foreground), so it has to be free when there is nothing to do.
+    func testReconcileIsIdempotentOnceConfirmed() {
+        let fake = FakeFcmSubscriber()
+        let (reconciler, store, _) = makeReconciler(fake)
+        _ = store.saveSubscription(baseUrl: "https://ntfy.sh", topic: "alerts")
+
+        reconciler.reconcile(reason: "first")
+        drainMainQueue()
+        let afterFirst = fake.subscribed.count
+
+        reconciler.reconcile(reason: "second")
+        drainMainQueue()
+
+        XCTAssertEqual(fake.subscribed.count, afterFirst, "no duplicate binds for already-confirmed topics")
+    }
+
+    // The regression that defines #1305: a failed bind must stay queued.
+    func testFailedSubscribeStaysQueuedAndRetriesOnNextReconcile() {
+        let fake = FakeFcmSubscriber()
+        fake.failures["alerts"] = FakeFcmSubscriber.Boom()
+        let (reconciler, store, _) = makeReconciler(fake)
+        _ = store.saveSubscription(baseUrl: "https://ntfy.sh", topic: "alerts")
+
+        reconciler.reconcile(reason: "first")
+        drainMainQueue()
+        XCTAssertEqual(store.getSubscriptionsPendingFcmSubscribe().count, 1,
+                       "a failed bind must NOT be marked subscribed")
+
+        fake.failures.removeAll() // transient failure clears
+        reconciler.reconcile(reason: "retry")
+        drainMainQueue()
+
+        XCTAssertEqual(fake.subscribed.filter { $0 == "alerts" }.count, 2, "the topic is retried")
+        XCTAssertTrue(store.getSubscriptionsPendingFcmSubscribe().isEmpty, "and then confirmed")
+    }
+
+    // Token rotation is why users report "it just stopped working after a couple
+    // months": FCM binds topics to a token, so a new one voids them all.
+    func testRotatedRegistrationTokenRequeuesEveryTopic() {
+        let fake = FakeFcmSubscriber()
+        let (reconciler, store, _) = makeReconciler(fake)
+        _ = store.saveSubscription(baseUrl: "https://ntfy.sh", topic: "alerts")
+
+        XCTAssertTrue(reconciler.noteRegistrationToken("token-one"))
+        reconciler.reconcile(reason: "first token")
+        drainMainQueue()
+        XCTAssertTrue(store.getSubscriptionsPendingFcmSubscribe().isEmpty)
+
+        XCTAssertTrue(reconciler.noteRegistrationToken("token-two"), "a new token invalidates state")
+        XCTAssertEqual(store.getSubscriptionsPendingFcmSubscribe().count, 1,
+                       "every topic must be rebound against the new token")
+
+        reconciler.reconcile(reason: "rotated token")
+        drainMainQueue()
+        XCTAssertEqual(fake.subscribed.filter { $0 == "alerts" }.count, 2)
+        XCTAssertEqual(fake.subscribed.filter { $0 == FcmSubscriptionReconciler.pollTopic }.count, 2,
+                       "the poll topic is bound to the token too, so it also rebinds")
+    }
+
+    func testUnchangedRegistrationTokenDoesNotRequeue() {
+        let fake = FakeFcmSubscriber()
+        let (reconciler, store, _) = makeReconciler(fake)
+        _ = store.saveSubscription(baseUrl: "https://ntfy.sh", topic: "alerts")
+
+        reconciler.noteRegistrationToken("token-one")
+        reconciler.reconcile(reason: "first")
+        drainMainQueue()
+
+        XCTAssertFalse(reconciler.noteRegistrationToken("token-one"), "same token is a no-op")
+        XCTAssertTrue(store.getSubscriptionsPendingFcmSubscribe().isEmpty)
+    }
+
+    // Firebase hands us a nil token on transient failures; treating that as a
+    // rotation would pointlessly requeue (and re-bind) everything.
+    func testMissingRegistrationTokenLeavesStateIntact() {
+        let fake = FakeFcmSubscriber()
+        let (reconciler, store, _) = makeReconciler(fake)
+        _ = store.saveSubscription(baseUrl: "https://ntfy.sh", topic: "alerts")
+
+        reconciler.noteRegistrationToken("token-one")
+        reconciler.reconcile(reason: "first")
+        drainMainQueue()
+
+        XCTAssertFalse(reconciler.noteRegistrationToken(nil))
+        XCTAssertFalse(reconciler.noteRegistrationToken(""))
+        XCTAssertTrue(store.getSubscriptionsPendingFcmSubscribe().isEmpty, "state untouched")
+    }
+
+    func testUnsubscribeDropsTheFirebaseTopic() {
+        let fake = FakeFcmSubscriber()
+        let (reconciler, _, _) = makeReconciler(fake)
+
+        reconciler.unsubscribe(baseUrl: "https://ntfy.sh", topic: "alerts")
+
+        XCTAssertEqual(fake.unsubscribed, ["alerts"])
+    }
 }
