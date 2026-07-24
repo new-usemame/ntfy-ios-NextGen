@@ -8,7 +8,8 @@ import CoreData
 
 class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
     private let tag = "AppDelegate"
-    private let pollTopic = "~poll" // See ntfy server if ever changed
+    // Single source of truth lives with the reconciler, which is what subscribes to it.
+    private let pollTopic = FcmSubscriptionReconciler.pollTopic
     
     // Implements navigation from notifications, see https://stackoverflow.com/a/70731861/1440785
     @Published var selectedBaseUrl: String? = nil
@@ -151,6 +152,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
         let token = deviceToken.map { data in String(format: "%02.2hhx", data) }.joined()
         Messaging.messaging().apnsToken = deviceToken
         Log.d(tag, "Registered for remote notifications. Passing APNs token \(token.prefix(12))... to Firebase")
+        // FCM topic binding only works once this token is associated, and this
+        // callback frequently lands *after* the FCM token did. Reconciling here
+        // means whichever of the two arrives second completes the round —
+        // previously the earlier one just failed silently for every topic.
+        FcmSubscriptionReconciler.shared.reconcile(reason: "APNs token registered")
     }
     
     func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
@@ -253,30 +259,14 @@ extension AppDelegate: MessagingDelegate {
         } else {
             Log.w(tag, "Firebase token missing")
         }
-        
-        // Subscribe to ~poll topic
-        Messaging.messaging().subscribe(toTopic: pollTopic) { error in
-            if let error {
-                Log.e(self.tag, "Firebase subscribe failed for \(self.pollTopic)", error)
-            } else {
-                Log.d(self.tag, "Firebase subscribe succeeded for \(self.pollTopic)")
-            }
-        }
-        
-        // Re-subscribe to Firebase for all topics
-        let store = Store.shared
-        store.getSubscriptions()?.forEach{ subscription in
-            if let baseUrl = subscription.baseUrl, let topic = subscription.topic {
-                let firebaseTopicName = firebaseTopic(baseUrl: baseUrl, topic: topic)
-                Log.d(tag, "Re-subscribing to topic \(baseUrl)/\(topic)")
-                Messaging.messaging().subscribe(toTopic: firebaseTopicName) { error in
-                    if let error {
-                        Log.e(self.tag, "Firebase subscribe failed for \(firebaseTopicName)", error)
-                    } else {
-                        Log.d(self.tag, "Firebase subscribe succeeded for \(firebaseTopicName)")
-                    }
-                }
-            }
-        }
+
+        // A rotated token voids every existing topic binding, so record it first
+        // (that marks all subscriptions stale) and then rebuild them. This used
+        // to be a single best-effort re-subscribe loop that swallowed every
+        // error, which is why a rotation could silently kill push forever —
+        // ntfy#1305. Reconciling is retryable and idempotent; if the APNs token
+        // has not landed yet this no-ops and the APNs callback re-drives it.
+        FcmSubscriptionReconciler.shared.noteRegistrationToken(fcmToken)
+        FcmSubscriptionReconciler.shared.reconcile(reason: "FCM registration token")
     }
 }

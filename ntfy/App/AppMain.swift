@@ -28,6 +28,11 @@ struct AppMain: App {
                     Log.d(tag, "App became active, refreshing objects")
                     store.hardRefresh()
                     delegate.refreshNotificationSettings()
+                    // Self-heal a desynced device (ntfy#1305). Before this, a
+                    // topic whose FCM binding failed stayed dead until the user
+                    // reinstalled the app — which is exactly what the upstream
+                    // thread reports as the only known workaround.
+                    FcmSubscriptionReconciler.shared.reconcile(reason: "app became active")
                 }
         }
     }

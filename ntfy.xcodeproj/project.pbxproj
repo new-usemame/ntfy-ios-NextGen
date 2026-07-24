@@ -60,6 +60,7 @@
 		948671482841B1430093C7A4 /* NotificationContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 948671462841B0B20093C7A4 /* NotificationContent.swift */; };
 		9486714A2841D0CE0093C7A4 /* ActionExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 948671492841D0CE0093C7A4 /* ActionExecutor.swift */; };
 		94A3F7C8283734D900C48E79 /* SubscriptionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94A3F7C7283734D900C48E79 /* SubscriptionManager.swift */; };
+		94A3F7D1283734D900C48E79 /* FcmSubscriptionReconciler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94A3F7D0283734D900C48E79 /* FcmSubscriptionReconciler.swift */; };
 		94A3F7CA28386B2100C48E79 /* Config.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94A3F7C928386B2100C48E79 /* Config.swift */; };
 		94A3F7CB28386B2100C48E79 /* Config.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94A3F7C928386B2100C48E79 /* Config.swift */; };
 		94B736D7284AF9BE003D69FB /* MainView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94B736D6284AF9BE003D69FB /* MainView.swift */; };
@@ -152,6 +153,7 @@
 		948671462841B0B20093C7A4 /* NotificationContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationContent.swift; sourceTree = "<group>"; };
 		948671492841D0CE0093C7A4 /* ActionExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionExecutor.swift; sourceTree = "<group>"; };
 		94A3F7C7283734D900C48E79 /* SubscriptionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionManager.swift; sourceTree = "<group>"; };
+		94A3F7D0283734D900C48E79 /* FcmSubscriptionReconciler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FcmSubscriptionReconciler.swift; sourceTree = "<group>"; };
 		94A3F7C928386B2100C48E79 /* Config.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = Config.swift; sourceTree = "<group>"; };
 		94B736D6284AF9BE003D69FB /* MainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainView.swift; sourceTree = "<group>"; };
 		94CD1965283E662900973B93 /* emojis.json */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.json; path = emojis.json; sourceTree = "<group>"; };
@@ -310,6 +312,7 @@
 				29E8419F2FB417EA00F927E4 /* NotificationAttachmentImageLoader.swift */,
 				E27008112AF1030A006E33BA /* NotificationsObservable.swift */,
 				94A3F7C7283734D900C48E79 /* SubscriptionManager.swift */,
+				94A3F7D0283734D900C48E79 /* FcmSubscriptionReconciler.swift */,
 				E270080F2AF0F64B006E33BA /* SubscriptionsObservable.swift */,
 				9407EDD9284ADE1F00C1C334 /* User.swift */,
 			);
@@ -521,6 +524,7 @@
 				9474F212283327C200CDE4DD /* Helpers.swift in Sources */,
 				9474F217283531A300CDE4DD /* Log.swift in Sources */,
 				94A3F7C8283734D900C48E79 /* SubscriptionManager.swift in Sources */,
+				94A3F7D1283734D900C48E79 /* FcmSubscriptionReconciler.swift in Sources */,
 				9474F1D2282F2D2C00CDE4DD /* AppDelegate.swift in Sources */,
 				29E8419B2FB417E400F927E4 /* SubscriptionListView.swift in Sources */,
 				29E8419C2FB417E400F927E4 /* SubscriptionAddView.swift in Sources */,

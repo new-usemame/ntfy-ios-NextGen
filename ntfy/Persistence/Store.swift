@@ -135,6 +135,53 @@ class Store: ObservableObject {
         return try? context.fetch(Subscription.fetchRequest())
     }
 
+    /// Subscriptions FCM has not confirmed a topic binding for (ntfy#1305).
+    ///
+    /// These are the retry queue: a row lands here when it is first created, and
+    /// stays here until `subscribe(toTopic:)` calls back without an error, so a
+    /// failed or never-attempted binding is picked up by the next reconcile
+    /// instead of being lost.
+    func getSubscriptionsPendingFcmSubscribe() -> [Subscription] {
+        var result: [Subscription] = []
+        context.performAndWait {
+            let request = Subscription.fetchRequest()
+            request.predicate = NSPredicate(format: "fcmSubscribed == NO OR fcmSubscribed == nil")
+            result = (try? context.fetch(request)) ?? []
+        }
+        return result
+    }
+
+    func setFcmSubscribed(_ subscription: Subscription, _ value: Bool) {
+        context.performAndWait {
+            guard subscription.fcmSubscribed != value else { return }
+            subscription.fcmSubscribed = value
+            do {
+                try context.save()
+            } catch let error {
+                Log.w(Store.tag, "Cannot update fcmSubscribed", error)
+            }
+        }
+    }
+
+    /// Void every topic binding, e.g. because the FCM registration token rotated.
+    ///
+    /// FCM binds topics to a token, so a new token means none of the old
+    /// bindings exist any more. Marking them stale is what makes the next
+    /// reconcile rebuild them — without this the flags would stay true and the
+    /// device would silently stop receiving push, which is the original bug.
+    func markAllFcmSubscriptionsStale() {
+        context.performAndWait {
+            let subscriptions = (try? context.fetch(Subscription.fetchRequest())) ?? []
+            guard !subscriptions.isEmpty else { return }
+            subscriptions.forEach { $0.fcmSubscribed = false }
+            do {
+                try context.save()
+            } catch let error {
+                Log.w(Store.tag, "Cannot mark FCM subscriptions stale", error)
+            }
+        }
+    }
+
     /// Resolves a subscription's display name on the context's own queue and returns a plain `String`.
     /// `context` is the main-queue viewContext, so the push path — the NSE's `handleMessage` and
     /// `AppDelegate.showNotification`, both off the main queue — must not fetch a `Subscription` and read

@@ -1,39 +1,31 @@
 import Foundation
-import FirebaseMessaging
 
 /// Manager to combine persisting a subscription to the data store and subscribing to Firebase.
 /// This is to centralize the logic in one place.
 struct SubscriptionManager {
     private let tag = "SubscriptionManager"
     var store: Store
-    
+    var reconciler: FcmSubscriptionReconciler = .shared
+
     func subscribe(baseUrl: String, topic: String) {
         let normalizedBaseUrl = normalizeBaseUrl(baseUrl)
-        let firebaseTopicName = firebaseTopic(baseUrl: normalizedBaseUrl, topic: topic)
         Log.d(tag, "Subscribing to \(topicUrl(baseUrl: normalizedBaseUrl, topic: topic))")
-        Messaging.messaging().subscribe(toTopic: firebaseTopicName) { error in
-            if let error {
-                Log.e(tag, "Firebase subscribe failed for \(firebaseTopicName)", error)
-            } else {
-                Log.d(tag, "Firebase subscribe succeeded for \(firebaseTopicName)")
-            }
-        }
+        // Persist first. The row is created with `fcmSubscribed == false`, which
+        // makes it the retry queue: if the FCM binding below fails (or never even
+        // gets attempted because the APNs token hasn't landed yet), the next
+        // reconcile picks it up. Previously the subscribe was fire-and-forget and
+        // the row was saved regardless, so a single failure meant this topic
+        // never received push again — ntfy#1305.
         let subscription = store.saveSubscription(baseUrl: normalizedBaseUrl, topic: topic)
+        reconciler.reconcile(reason: "subscribed to \(topic)")
         poll(subscription)
     }
-    
+
     func unsubscribe(_ subscription: Subscription) {
         Log.d(tag, "Unsubscribing from \(subscription.urlString())")
         DispatchQueue.main.async {
             if let baseUrl = subscription.baseUrl, let topic = subscription.topic {
-                let firebaseTopicName = firebaseTopic(baseUrl: baseUrl, topic: topic)
-                Messaging.messaging().unsubscribe(fromTopic: firebaseTopicName) { error in
-                    if let error {
-                        Log.e(tag, "Firebase unsubscribe failed for \(firebaseTopicName)", error)
-                    } else {
-                        Log.d(tag, "Firebase unsubscribe succeeded for \(firebaseTopicName)")
-                    }
-                }
+                reconciler.unsubscribe(baseUrl: baseUrl, topic: topic)
             }
             store.delete(subscription: subscription)
         }
