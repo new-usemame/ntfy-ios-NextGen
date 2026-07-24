@@ -203,6 +203,67 @@ final class ntfyTests: XCTestCase {
         XCTAssertEqual(makeNotification(message: "hello", title: "Header", tags: nil).formatTitle(), "Header")
     }
 
+    // MARK: UNMutableNotificationContent.actionCategoryIdentifier — per-action-set banner category
+    // Regression: the old code registered ONE global "ntfyActions" category and rewrote it for
+    // every notification, so notifications delivered close together with different buttons
+    // clobbered each other's banner actions. The fix keys the category off the action set, so
+    // different sets get different (stable, cross-process) ids and can't overwrite each other.
+
+    private func action(_ id: String, _ label: String) -> Action {
+        return Action(id: id, action: "http", label: label, url: "https://ntfy.sh/x",
+                      method: "POST", headers: nil, body: nil, clear: nil)
+    }
+
+    func testActionCategoryEmptyForNoActions() {
+        XCTAssertEqual(UNMutableNotificationContent.actionCategoryIdentifier(for: []), "")
+    }
+
+    func testActionCategoryStableAndPrefixed() {
+        let set = [action("0", "Approve"), action("1", "Reject")]
+        let id = UNMutableNotificationContent.actionCategoryIdentifier(for: set)
+        // Deterministic: recomputing the same set yields the same id (so two notifications
+        // with identical buttons safely reuse one category), and it's namespaced.
+        XCTAssertEqual(id, UNMutableNotificationContent.actionCategoryIdentifier(for: set))
+        XCTAssertTrue(id.hasPrefix("ntfyActions."))
+    }
+
+    func testActionCategoryDistinctForDifferentSets() {
+        // The core anti-clobber property: the old code returned the SAME "ntfyActions" for
+        // both of these; the fix must return DIFFERENT ids.
+        let approve = UNMutableNotificationContent.actionCategoryIdentifier(for: [action("0", "Approve")])
+        let openUrl = UNMutableNotificationContent.actionCategoryIdentifier(for: [action("0", "Open")])
+        XCTAssertNotEqual(approve, openUrl)
+    }
+
+    func testActionCategoryRespectsFieldBoundaries() {
+        // Field/record delimiters must keep ["a","bc"] distinct from ["ab","c"] and from a
+        // two-action set, so no accidental collisions across genuinely different button sets.
+        let a = UNMutableNotificationContent.actionCategoryIdentifier(for: [action("a", "bc")])
+        let b = UNMutableNotificationContent.actionCategoryIdentifier(for: [action("ab", "c")])
+        let twoActions = UNMutableNotificationContent.actionCategoryIdentifier(for: [action("a", "b"), action("c", "d")])
+        XCTAssertNotEqual(a, b)
+        XCTAssertNotEqual(a, twoActions)
+    }
+
+    func testActionCategoryIsOrderSensitive() {
+        // iOS renders the buttons in order, so [Approve, Reject] is a different banner than
+        // [Reject, Approve] and must get its own category.
+        let ab = UNMutableNotificationContent.actionCategoryIdentifier(for: [action("0", "Approve"), action("1", "Reject")])
+        let ba = UNMutableNotificationContent.actionCategoryIdentifier(for: [action("1", "Reject"), action("0", "Approve")])
+        XCTAssertNotEqual(ab, ba)
+    }
+
+    func testActionCategoryCapsAtFourActions() {
+        // iOS renders at most 4 actions, and the category id is derived from the same 4, so a
+        // difference only in a 5th (never-rendered) action does not create a new category.
+        let base = [action("0", "A"), action("1", "B"), action("2", "C"), action("3", "D")]
+        let plusFifth = base + [action("4", "E")]
+        XCTAssertEqual(
+            UNMutableNotificationContent.actionCategoryIdentifier(for: base),
+            UNMutableNotificationContent.actionCategoryIdentifier(for: plusFifth)
+        )
+    }
+
     // MARK: UNMutableNotificationContent.modify — priority → interruption level / relevance (critical alerts, ntfy #1235)
     //
     // These pin the flagship critical-alerts mapping (the 47-reaction #1235, implemented on main but
