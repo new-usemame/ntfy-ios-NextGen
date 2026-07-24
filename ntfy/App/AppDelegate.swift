@@ -237,7 +237,7 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
         
         // Execute user action or click action (if any)
         if let action = action {
-            ActionExecutor.execute(action)
+            ActionExecutor.execute(action, notificationId: response.notification.request.identifier)
         } else if let click = message.click, click != "", let url = URL(string: click) {
             UIApplication.shared.open(url, options: [:], completionHandler: nil)
         }

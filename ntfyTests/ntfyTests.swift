@@ -43,6 +43,41 @@ final class ntfyTests: XCTestCase {
         XCTAssertEqual(Actions.shared.encode(nil), "")
     }
 
+    // MARK: ActionExecutor.identifiersToClear — honor ntfy's `clear` flag (ntfy #1728, ntfy-ios#38)
+
+    private func makeAction(clear: Bool?) -> Action {
+        Action(id: "1", action: "http", label: "Approve",
+               url: "https://example.com/approve", method: nil,
+               headers: nil, body: nil, clear: clear)
+    }
+
+    func testClearTrueWithIdReturnsThatId() {
+        // clear==true + a known delivered-notification id → dismiss exactly that one.
+        XCTAssertEqual(
+            ActionExecutor.identifiersToClear(for: makeAction(clear: true), notificationId: "abc-123"),
+            ["abc-123"]
+        )
+    }
+
+    func testClearTrueWithoutIdClearsNothing() {
+        // clear==true but no id is known → nothing to remove (must not crash / clear all).
+        XCTAssertNil(ActionExecutor.identifiersToClear(for: makeAction(clear: true), notificationId: nil))
+    }
+
+    func testClearTrueWithEmptyIdClearsNothing() {
+        // An empty identifier is not a real notification → do not clear.
+        XCTAssertNil(ActionExecutor.identifiersToClear(for: makeAction(clear: true), notificationId: ""))
+    }
+
+    func testClearFalseClearsNothing() {
+        XCTAssertNil(ActionExecutor.identifiersToClear(for: makeAction(clear: false), notificationId: "abc-123"))
+    }
+
+    func testClearAbsentClearsNothing() {
+        // The overwhelmingly common case: no `clear` field on the action → banner stays.
+        XCTAssertNil(ActionExecutor.identifiersToClear(for: makeAction(clear: nil), notificationId: "abc-123"))
+    }
+
     // MARK: UNMutableNotificationContent.modify — never leak the "New message" placeholder (#1080)
 
     func testModifyReplacesPlaceholderWithRealBody() {

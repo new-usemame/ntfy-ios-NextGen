@@ -106,7 +106,7 @@ struct NotificationRowView: View {
                 HStack {
                     ForEach(notification.actionsList()) { action in
                         Button(action.label) {
-                            ActionExecutor.execute(action)
+                            ActionExecutor.execute(action, notificationId: notification.id)
                         }
                         .buttonStyle(.borderedProminent)
                     }
