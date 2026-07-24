@@ -182,6 +182,20 @@ class Store: ObservableObject {
         }
     }
 
+    /// Resolves a subscription's display name on the context's own queue and returns a plain `String`.
+    /// `context` is the main-queue viewContext, so the push path — the NSE's `handleMessage` and
+    /// `AppDelegate.showNotification`, both off the main queue — must not fetch a `Subscription` and read
+    /// its properties directly (`getSubscription(...)?.displayName()` did exactly that). Doing the fetch
+    /// and the `displayName()` extraction inside `performAndWait` keeps every Core Data access on the
+    /// context's queue and hands the caller a value it can use from anywhere. Mirrors `getBasicUser`.
+    func subscriptionDisplayName(baseUrl: String, topic: String) -> String? {
+        var displayName: String?
+        context.performAndWait {
+            displayName = try? fetchSubscription(baseUrl: baseUrl, topic: topic)?.displayName()
+        }
+        return displayName
+    }
+
     func completeAttachmentDownload(notificationID: String, localPath: String, resolvedType: String?, resolvedSize: Int64) {
         context.performAndWait {
             let request = Notification.fetchRequest()

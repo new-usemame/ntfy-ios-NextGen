@@ -62,7 +62,7 @@ class NotificationService: UNNotificationServiceExtension {
             return
         }
         let user = store?.getBasicUser(baseUrl: baseUrl)
-        let displayName = store?.getSubscription(baseUrl: baseUrl, topic: message.topic)?.displayName()
+        let displayName = store?.subscriptionDisplayName(baseUrl: baseUrl, topic: message.topic)
         content.modify(message: message, baseUrl: baseUrl, displayName: displayName)
         content.attachImageIfNeeded(message: message, user: user) {
             contentHandler(content)
