@@ -203,6 +203,44 @@ final class ntfyTests: XCTestCase {
         XCTAssertEqual(makeNotification(message: "hello", title: "Header", tags: nil).formatTitle(), "Header")
     }
 
+    // MARK: ActionExecutor.httpActionResult — non-2xx is a failure, not a silent success
+    // Regression: the old completion handler only checked the transport `error` and logged
+    // "succeeded" for any response, so an "Approve" action returning 401/403/500 looked fine.
+
+    private func httpResponse(_ status: Int) -> HTTPURLResponse {
+        return HTTPURLResponse(url: URL(string: "https://ntfy.sh/secret-broker-approve")!,
+                               statusCode: status, httpVersion: nil, headerFields: nil)!
+    }
+
+    func testHttpActionResultSuccessFor2xx() {
+        XCTAssertEqual(ActionExecutor.httpActionResult(response: httpResponse(200), error: nil), .success)
+        XCTAssertEqual(ActionExecutor.httpActionResult(response: httpResponse(201), error: nil), .success)
+        XCTAssertEqual(ActionExecutor.httpActionResult(response: httpResponse(204), error: nil), .success)
+        XCTAssertEqual(ActionExecutor.httpActionResult(response: httpResponse(299), error: nil), .success)
+    }
+
+    func testHttpActionResultFailureForNon2xx() {
+        XCTAssertEqual(ActionExecutor.httpActionResult(response: httpResponse(401), error: nil), .failure("HTTP 401"))
+        XCTAssertEqual(ActionExecutor.httpActionResult(response: httpResponse(403), error: nil), .failure("HTTP 403"))
+        XCTAssertEqual(ActionExecutor.httpActionResult(response: httpResponse(500), error: nil), .failure("HTTP 500"))
+        // 300 is the first non-2xx code above the success band.
+        XCTAssertEqual(ActionExecutor.httpActionResult(response: httpResponse(300), error: nil), .failure("HTTP 300"))
+    }
+
+    func testHttpActionResultFailureOnTransportError() {
+        let err = NSError(domain: NSURLErrorDomain, code: NSURLErrorNotConnectedToInternet, userInfo: nil)
+        if case .failure = ActionExecutor.httpActionResult(response: nil, error: err) {
+            // expected
+        } else {
+            XCTFail("transport error should classify as failure")
+        }
+    }
+
+    func testHttpActionResultSuccessWhenNoHttpResponseAndNoError() {
+        // Non-HTTP response with no transport error: nothing to assess → treat as success.
+        XCTAssertEqual(ActionExecutor.httpActionResult(response: nil, error: nil), .success)
+    }
+
     // MARK: UNMutableNotificationContent.modify — priority → interruption level / relevance (critical alerts, ntfy #1235)
     //
     // These pin the flagship critical-alerts mapping (the 47-reaction #1235, implemented on main but
