@@ -781,6 +781,64 @@ final class ntfyTests: XCTestCase {
         XCTAssertEqual(user.username, "mainuser")
     }
 
+    // MARK: Store READS must be safe from the push path's background queue — display-name / user resolution
+    //
+    // The read-side sibling of the block above. The NSE's handleMessage and AppDelegate.showNotification
+    // both resolve a subscription's display name (and the Basic-auth user) before building the notification,
+    // and both run OFF the main queue — handleMessage on the extension's queue, showNotification inside a
+    // URLSession poll completion (ApiService.newSession sets no delegate queue). PR #20 wrote the display
+    // name as getSubscription(...)?.displayName(): that fetches a viewContext-owned managed object off the
+    // context's queue AND reads its properties there. getBasicUser already hopped; the display-name read
+    // did not. subscriptionDisplayName(baseUrl:topic:) does the fetch and the displayName() extraction
+    // inside context.performAndWait and returns a String, so it is safe from any queue.
+    //
+    // RED before the fix: with -com.apple.CoreData.ConcurrencyDebug 1 (this scheme's Test action) the
+    // off-queue fetch traps (__Multithreading_Violation_AllThatIsLeftToUsIsHonor__), surfacing as
+    // "Restarting after unexpected exit, crash, or test timeout" (same red signal as the write tests above).
+    // The getBasicUser test is a genuine CONTROL: it already hopped, so it is green on both sides — it pins
+    // the axis as queue affinity (not value) and covers the accessor showNotification switches to in place
+    // of getUser(...)?.toBasicUser().
+
+    func testSubscriptionDisplayNameResolvesSafelyFromABackgroundQueue() {
+        let context = Store.shared.context
+        let subscription = Subscription(context: context)
+        subscription.baseUrl = "https://ntfy.sh"
+        subscription.topic = "offmaintopic"
+        subscription.customDisplayName = "Home Server"
+        deleteAfterTest(subscription)
+
+        let done = expectation(description: "subscriptionDisplayName returns off the context queue")
+        var resolved: String?
+        DispatchQueue.global(qos: .background).async {
+            resolved = Store.shared.subscriptionDisplayName(baseUrl: "https://ntfy.sh", topic: "offmaintopic")
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 5)
+
+        XCTAssertEqual(resolved, "Home Server",
+                       "a renamed subscription must resolve to its custom name from the push path's background queue")
+    }
+
+    func testGetBasicUserResolvesSafelyFromABackgroundQueue() {
+        // CONTROL: getBasicUser already wraps its fetch + toBasicUser() in performAndWait and returns a
+        // value, so it is green on both sides. Covers the accessor AppDelegate.showNotification switches to.
+        Store.shared.saveUser(baseUrl: "https://ntfy.offmain.example.com", username: "offmainuser", password: "pw")
+        if let user = Store.shared.getUser(baseUrl: "https://ntfy.offmain.example.com") {
+            deleteAfterTest(user)
+        }
+
+        let done = expectation(description: "getBasicUser returns off the context queue")
+        var resolved: BasicUser?
+        DispatchQueue.global(qos: .background).async {
+            resolved = Store.shared.getBasicUser(baseUrl: "https://ntfy.offmain.example.com")
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 5)
+
+        XCTAssertEqual(resolved?.username, "offmainuser",
+                       "getBasicUser must resolve the Basic-auth user from a background queue without tripping the concurrency guard")
+    }
+
     // MARK: A poll must report only NEWLY-STORED messages — repeat alerts (ntfy #1111 "ghost messages")
     //
     // `Store.saveNotifications` already computes the answer: it fetches the existing rows for the

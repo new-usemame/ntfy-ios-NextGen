@@ -170,8 +170,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate, ObservableObject {
     }
 
     private func showNotification(baseUrl: String, _ message: Message, completionHandler: (() -> Void)? = nil) {
-        let user = Store.shared.getUser(baseUrl: baseUrl)?.toBasicUser()
-        let displayName = Store.shared.getSubscription(baseUrl: baseUrl, topic: message.topic)?.displayName()
+        let user = Store.shared.getBasicUser(baseUrl: baseUrl)
+        let displayName = Store.shared.subscriptionDisplayName(baseUrl: baseUrl, topic: message.topic)
         let content = UNMutableNotificationContent()
         content.modify(message: message, baseUrl: baseUrl, displayName: displayName)
         content.attachImageIfNeeded(message: message, user: user) {
