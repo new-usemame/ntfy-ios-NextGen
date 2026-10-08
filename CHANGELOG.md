@@ -6,6 +6,12 @@ into the App Store "What's New" field. Engineering detail and upstream tracking 
 
 ## Unreleased
 
+- Reading or dismissing notifications on a self-hosted topic now requests a silent wake for your
+  other devices, so they can clear those notifications in the background. Background delivery is
+  best effort; opening the app still catches up when a wake is delayed.
+- Deleting a message, a selection, or a topic's message history also asks the server to delete those
+  messages for other clients. Read-only subscriptions and older servers keep the local action.
+
 - Settings → About → Licenses lists the open-source licenses the app is built on.
 
 ## 1.15.0
