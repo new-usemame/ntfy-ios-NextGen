@@ -11,4 +11,4 @@
 - Server source confirms no self-hosted upstream forwarding for controls. Real FCM/APNs/NSE and multi-device propagation remain unverified; relay improvement is a separate server/client follow-up.
 - Details, source lines, exact command shape and limits: [VERIFICATION.md](VERIFICATION.md).
 - Delivered: [PR #14](https://github.com/new-usemame/ntfy-ios-NextGen/pull/14), labeled `needs-review`, pushed as `new-usemame`. Do not merge or release.
-- Local raw logs and simulator resource notes remain private/uncommitted. Simulator/build/DerivedData leases are being released after verification.
+- Local raw logs and simulator resource notes remain private/uncommitted. Simulator, DerivedData and both capacity leases were explicitly released after verification.
