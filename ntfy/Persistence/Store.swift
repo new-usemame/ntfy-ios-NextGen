@@ -64,7 +64,6 @@ class Store: ObservableObject {
     var topicSecrets: TopicSecretStoring
     /// Only local read actions call this; remote ingestion never publishes.
     var clearPublisher: (ClearRequest, @escaping (Bool) -> Void) -> Void = { ApiService.shared.action($0, completion: $1) }
-    var deletePublisher: (ClearRequest, @escaping (Bool) -> Void) -> Void = { ApiService.shared.action($0, delete: true, completion: $1) }
     var wakePublisher: (String, @escaping () -> Void) -> Void = { ApiService.shared.wake(topic: $0, completion: $1) }
     var notificationRemover: (SequenceRemoval) -> Void = { $0.removeDelivered() }
     /// Whether a missing cached key may be re-derived from the password (PBKDF2). Off in the
@@ -587,11 +586,11 @@ class Store: ObservableObject {
                             user: try? fetchUser(baseUrl: baseUrl)?.toBasicUser(credentialStore: credentialStore))
     }
 
-    /// One user action may clear/delete many sequences. Finish its real-server requests first,
+    /// One read action may clear many sequences. Finish its real-server requests first,
     /// then wake each successful self-hosted topic once. Incoming ingestion never calls this.
-    private func sendActions(_ requests: [ClearRequest], delete: Bool = false, completion: (() -> Void)? = nil) {
+    private func sendActions(_ requests: [ClearRequest], completion: (() -> Void)? = nil) {
         guard !requests.isEmpty else { completion?(); return }
-        let publish = delete ? deletePublisher : clearPublisher
+        let publish = clearPublisher
         let wake = wakePublisher
         let lock = NSLock()
         let group = DispatchGroup()
@@ -812,14 +811,20 @@ class Store: ObservableObject {
 
     func delete(notifications: Set<Notification>) {
         context.performAndWait {
-            let requests = notifications.compactMap { clearRequest(for: $0) }
+            // Deleting history is local to this device, including its delivered banners. Capture
+            // identities before deleting rows; this path never reads credentials or publishes.
+            let removals = notifications.compactMap { notification -> SequenceRemoval? in
+                guard let subscription = notification.subscription, let baseUrl = subscription.baseUrl,
+                      let topic = subscription.topic, let id = notification.id else { return nil }
+                return SequenceRemoval(baseUrl: baseUrl, topic: topic, sequence: notification.sequenceID ?? id)
+            }
             do {
                 for notification in notifications {
                     deleteAttachmentLocalFile(for: notification)
                     context.delete(notification)
                 }
                 try context.save()
-                sendActions(requests, delete: true)
+                removals.forEach(notificationRemover)
             } catch {
                 Log.w(Store.tag, "Cannot delete notifications", error)
                 rollbackAndRefresh()

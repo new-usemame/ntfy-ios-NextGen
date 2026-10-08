@@ -150,7 +150,6 @@ final class ntfyTests: XCTestCase {
     override func setUp() {
         super.setUp()
         Store.shared.clearPublisher = { _, done in done(true) }
-        Store.shared.deletePublisher = { _, done in done(true) }
         Store.shared.wakePublisher = { _, done in done() }
         Store.shared.notificationRemover = { _ in }
         credentialStore = InMemoryCredentialStore()
@@ -1341,76 +1340,84 @@ final class ntfyTests: XCTestCase {
         XCTAssertTrue(instantRows(sub).allSatisfy(\.read))
     }
 
-    func testInstantMixedTopicDeleteSelectionWakesOnlySuccessfulTopicOnce() {
-        let good = instantSubscription(topic: "instant-good")
-        let denied = instantSubscription(topic: "instant-denied")
-        Store.shared.save(notificationsFromMessages: [instantMessage("good-a", sequence: "one", topic: "instant-good"), instantMessage("good-b", sequence: "two", topic: "instant-good")], withSubscription: good)
-        Store.shared.save(notificationsFromMessages: [instantMessage("denied-a", sequence: "one", topic: "instant-denied")], withSubscription: denied)
-        Store.shared.deletePublisher = { request, done in done(request.topic == "instant-good") }
-        var wakes: [String] = []
-        let woke = expectation(description: "successful topic wakes once")
-        Store.shared.wakePublisher = { topic, done in wakes.append(topic); done(); woke.fulfill() }
-        Store.shared.delete(notifications: Set(instantRows(good) + instantRows(denied)))
-        wait(for: [woke], timeout: 2)
-        XCTAssertEqual(wakes, [topicHash(baseUrl: "https://selfhost.invalid", topic: "instant-good")])
-        XCTAssertTrue(instantRows(good).isEmpty)
-        XCTAssertTrue(instantRows(denied).isEmpty)
+    func testInstantMixedTopicDeleteSelectionStaysLocalWithoutPublishingOrWake() {
+        let selfhost = instantSubscription(topic: "local-selfhost")
+        let direct = instantSubscription(baseUrl: Config.appBaseUrl, topic: "local-default")
+        Store.shared.save(notificationsFromMessages: [instantMessage("local-self-a", sequence: "one", topic: "local-selfhost"), instantMessage("local-self-b", sequence: "two", topic: "local-selfhost")], withSubscription: selfhost)
+        Store.shared.save(notificationsFromMessages: [instantMessage("local-direct-a", sequence: "one", topic: "local-default")], withSubscription: direct)
+        var published: [ClearRequest] = []
+        Store.shared.clearPublisher = { request, done in published.append(request); done(true) }
+        let unexpected = expectation(description: "local mixed selection cannot wake another device")
+        unexpected.isInverted = true
+        Store.shared.wakePublisher = { _, done in done(); unexpected.fulfill() }
+        Store.shared.delete(notifications: Set(instantRows(selfhost) + instantRows(direct)))
+        wait(for: [unexpected], timeout: 0.05)
+        XCTAssertTrue(instantRows(selfhost).isEmpty)
+        XCTAssertTrue(instantRows(direct).isEmpty)
+        XCTAssertTrue(published.isEmpty, "local selection deletion must neither clear nor delete server sequences")
     }
 
     func testInstantDefaultServerReadAndDeleteNeverPublishWake() throws {
         let sub = instantSubscription(baseUrl: Config.appBaseUrl)
         Store.shared.save(notificationsFromMessages: [instantMessage("default", sequence: "job")], withSubscription: sub)
         var clears = 0
-        var deletes = 0
         Store.shared.clearPublisher = { _, done in clears += 1; done(true) }
-        Store.shared.deletePublisher = { _, done in deletes += 1; done(true) }
         let unexpected = expectation(description: "default server already sends direct controls")
         unexpected.isInverted = true
         Store.shared.wakePublisher = { _, done in done(); unexpected.fulfill() }
         Store.shared.setRead(true, forSubscription: sub)
         Store.shared.delete(notification: try XCTUnwrap(instantRows(sub).first))
         wait(for: [unexpected], timeout: 0.05)
-        XCTAssertEqual(clears, 1)
-        XCTAssertEqual(deletes, 1)
+        XCTAssertEqual(clears, 1, "deletion must not publish another clear")
+        XCTAssertTrue(instantRows(sub).isEmpty)
     }
 
-    func testInstantSingleSelectionAndAllDeletePublishSnapshotsAndOneWakePerTopic() throws {
-        var deletes: [ClearRequest] = []
-        var wakes: [String] = []
+    func testInstantSingleSelectionAndAllDeletesStayLocalOnBothServerTypes() throws {
+        var published: [ClearRequest] = []
         var removals: [SequenceRemoval] = []
-        Store.shared.deletePublisher = { request, done in deletes.append(request); done(true) }
+        var expectedScopes: [String] = []
         Store.shared.notificationRemover = { removals.append($0) }
-        let woke = expectation(description: "one wake for each delete action")
-        woke.expectedFulfillmentCount = 3
-        Store.shared.wakePublisher = { topic, done in wakes.append(topic); done(); woke.fulfill() }
-        for count in 1...3 {
-            let topic = "instant-delete-\(count)"
-            let sub = instantSubscription(topic: topic)
-            Store.shared.save(notificationsFromMessages: (0..<count).map { instantMessage("delete-\(count)-\($0)", sequence: "job-\($0)", topic: topic) }, withSubscription: sub)
-            let rows = instantRows(sub)
-            if count == 1 { Store.shared.delete(notification: try XCTUnwrap(rows.first)) }
-            else if count == 2 { Store.shared.delete(notifications: Set(rows)) }
-            else { Store.shared.delete(allNotificationsFor: sub) }
-            XCTAssertTrue(instantRows(sub).isEmpty)
+        Store.shared.clearPublisher = { request, done in published.append(request); done(true) }
+        let unexpected = expectation(description: "all local delete APIs cannot wake")
+        unexpected.isInverted = true
+        var wakeCount = 0
+        Store.shared.wakePublisher = { _, done in
+            wakeCount += 1
+            done()
+            if wakeCount == 1 { unexpected.fulfill() }
         }
-        wait(for: [woke], timeout: 2)
-        XCTAssertEqual(deletes.count, 6)
-        XCTAssertEqual(removals.count, 6)
-        XCTAssertEqual(Set(wakes), Set((1...3).map { topicHash(baseUrl: "https://selfhost.invalid", topic: "instant-delete-\($0)") }))
-        XCTAssertEqual(wakes.count, 3)
-        XCTAssertTrue(deletes.allSatisfy { $0.baseUrl == "https://selfhost.invalid" })
+        for (server, baseUrl) in ["selfhost": "https://selfhost.invalid", "default": Config.appBaseUrl] {
+            for count in 1...3 {
+                let topic = "local-delete-\(server)-\(count)"
+                let sub = instantSubscription(baseUrl: baseUrl, topic: topic)
+                Store.shared.save(notificationsFromMessages: (0..<count).map { instantMessage("local-delete-\(server)-\(count)-\($0)", sequence: "job-\($0)", topic: topic) }, withSubscription: sub)
+                let rows = instantRows(sub)
+                expectedScopes += rows.map { topicUrl(baseUrl: baseUrl, topic: topic) + "/" + ($0.sequenceID ?? $0.id ?? "") }
+                if count == 1 { Store.shared.delete(notification: try XCTUnwrap(rows.first)) }
+                else if count == 2 { Store.shared.delete(notifications: Set(rows)) }
+                else { Store.shared.delete(allNotificationsFor: sub) }
+                XCTAssertTrue(instantRows(sub).isEmpty, "API \(count) must delete local \(server) rows")
+            }
+        }
+        wait(for: [unexpected], timeout: 0.05)
+        XCTAssertEqual(wakeCount, 0, "none of the local deletion APIs may wake another device")
+        XCTAssertTrue(published.isEmpty, "message, selection and history deletion are all local-only")
+        XCTAssertEqual(removals.count, 12, "retain same-device delivered removal for every locally deleted row")
+        XCTAssertEqual(Set(removals.map { topicUrl(baseUrl: $0.baseUrl, topic: $0.topic) + "/" + $0.sequence }), Set(expectedScopes), "local removal must target only the deleted server/topic/sequences")
     }
 
-    func testInstantFailedDeleteStillDeletesLocallyWithoutWake() throws {
+    func testInstantLocalDeleteDoesNotAttemptEvenADeniedSourceWrite() throws {
         let sub = instantSubscription()
-        Store.shared.save(notificationsFromMessages: [instantMessage("delete-offline", sequence: "job")], withSubscription: sub)
-        Store.shared.deletePublisher = { _, done in done(false) }
-        let unexpected = expectation(description: "failed delete cannot wake")
+        Store.shared.save(notificationsFromMessages: [instantMessage("local-denied", sequence: "job")], withSubscription: sub)
+        var attempts = 0
+        Store.shared.clearPublisher = { _, done in attempts += 1; done(false) }
+        let unexpected = expectation(description: "local delete never attempts wake")
         unexpected.isInverted = true
         Store.shared.wakePublisher = { _, done in done(); unexpected.fulfill() }
         Store.shared.delete(notification: try XCTUnwrap(instantRows(sub).first))
         wait(for: [unexpected], timeout: 0.05)
         XCTAssertTrue(instantRows(sub).isEmpty)
+        XCTAssertEqual(attempts, 0, "read-only credentials must not even be consulted for local deletion")
     }
 
     func testInstantWakeRequestContainsOnlyHashFixedSequenceAndNoSourceCredentials() throws {
@@ -1427,16 +1434,16 @@ final class ntfyTests: XCTestCase {
         XCTAssertNil(api.wakeRequest(topic: "../private"))
     }
 
-    func testInstantDeleteActionUsesSourceCredentialsAndReportsHTTPFailure() {
+    func testInstantClearActionUsesSourceCredentialsAndReportsHTTPFailure() {
         let api = ApiService(credentialStore: credentialStore)
         XCTAssertTrue(credentialStore.setHTTPHeaders(["CF-Access-Client-Secret": "origin-access"], baseUrl: "https://selfhost.invalid"))
         let clear = ClearRequest(baseUrl: "https://selfhost.invalid", topic: "instant", sequence: "job", user: BasicUser(username: "writer", password: "source-password"))
         RecordingURLProtocol.reset()
-        let recorded = expectation(description: "source DELETE attempted")
-        api.action(clear, delete: true, session: recordingSession()) { success in XCTAssertFalse(success); recorded.fulfill() }
+        let recorded = expectation(description: "source clear attempted")
+        api.action(clear, session: recordingSession()) { success in XCTAssertFalse(success); recorded.fulfill() }
         wait(for: [recorded], timeout: 2)
-        XCTAssertEqual(RecordingURLProtocol.requests.first?.httpMethod, "DELETE")
-        XCTAssertEqual(RecordingURLProtocol.requests.first?.url?.absoluteString, "https://selfhost.invalid/instant/job")
+        XCTAssertEqual(RecordingURLProtocol.requests.first?.httpMethod, "PUT")
+        XCTAssertEqual(RecordingURLProtocol.requests.first?.url?.absoluteString, "https://selfhost.invalid/instant/job/clear")
         XCTAssertEqual(RecordingURLProtocol.requests.first?.value(forHTTPHeaderField: "Authorization"), clear.user?.toHeader())
         XCTAssertEqual(RecordingURLProtocol.requests.first?.value(forHTTPHeaderField: "CF-Access-Client-Secret"), "origin-access")
         for status in [200, 403, 404, 500] {
@@ -1490,7 +1497,6 @@ final class ntfyTests: XCTestCase {
         var removals: [SequenceRemoval] = []
         Store.shared.notificationRemover = { removals.append($0) }
         Store.shared.clearPublisher = { _, _ in XCTFail("received state cannot send clear") }
-        Store.shared.deletePublisher = { _, _ in XCTFail("received state cannot send delete") }
         Store.shared.wakePublisher = { _, _ in XCTFail("received state cannot send wake") }
         var manager = SubscriptionManager(store: Store.shared)
         manager.fetch = { request, done in
@@ -1571,7 +1577,6 @@ final class ntfyTests: XCTestCase {
             }
         }
         Store.shared.clearPublisher = { _, _ in XCTFail("wake reconciliation cannot send clear") }
-        Store.shared.deletePublisher = { _, _ in XCTFail("wake reconciliation cannot send delete") }
         Store.shared.wakePublisher = { _, _ in XCTFail("wake reconciliation cannot re-wake") }
         let done = expectation(description: "same-second control applied before wake completion")
         XCTAssertTrue(manager.handleSilentWake(userInfo: instantWake()) { success in

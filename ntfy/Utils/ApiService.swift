@@ -69,12 +69,8 @@ class ApiService {
     }
 
     /// Only a successful response from the real server permits an upstream wake.
-    func action(_ clear: ClearRequest, delete: Bool = false, session: URLSession? = nil, completion: @escaping (Bool) -> Void) {
-        guard var request = clearRequest(clear) else { completion(false); return }
-        if delete {
-            request.url = URL(string: "\(topicUrl(baseUrl: clear.baseUrl, topic: clear.topic))/\(clear.sequence)")
-            request.httpMethod = "DELETE"
-        }
+    func action(_ clear: ClearRequest, session: URLSession? = nil, completion: @escaping (Bool) -> Void) {
+        guard let request = clearRequest(clear) else { completion(false); return }
         runOneShot(request, timeout: 8, baseUrl: clear.baseUrl, session: session) { _, response, error in
             let succeeded = error == nil && (200..<300).contains((response as? HTTPURLResponse)?.statusCode ?? 0)
             if !succeeded {
