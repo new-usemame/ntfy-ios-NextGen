@@ -72,15 +72,17 @@ final class LaunchExperience: ObservableObject {
     static let seenKey = "whatsNewLastSeenVersion"
     static let reviewKey = "reviewLastPromptedVersion"
     static let firstLaunchKey = "reviewFirstLaunchDate"
-    let current = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+    let current: String
     @Published var showingWhatsNew = false
     private(set) var entries: [ReleaseNotes] = []
     private(set) var noticeShown = false
     private var prepared = false
     private let defaults: UserDefaults
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard,
+         current: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0") {
         self.defaults = defaults
+        self.current = current
         #if DEBUG
         // Simulator evidence can seed an update and elapsed install age without changing Info.plist.
         let arguments = ProcessInfo.processInfo.arguments

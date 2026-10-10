@@ -6561,7 +6561,7 @@ final class LaunchExperiencePolicyTests: XCTestCase {
         let suite = "LaunchExperienceTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
-        let session = LaunchExperience(defaults: defaults)
+        let session = LaunchExperience(defaults: defaults, current: current)
         session.prepare(hasSubscriptions: false, movedTopicsPending: false, now: now)
         XCTAssertEqual(defaults.object(forKey: LaunchExperience.firstLaunchKey) as? Date, now)
         XCTAssertEqual(defaults.string(forKey: LaunchExperience.seenKey), session.current)
@@ -6570,7 +6570,7 @@ final class LaunchExperiencePolicyTests: XCTestCase {
 
         defaults.removeObject(forKey: LaunchExperience.seenKey)
         defaults.removeObject(forKey: LaunchExperience.firstLaunchKey)
-        let moved = LaunchExperience(defaults: defaults)
+        let moved = LaunchExperience(defaults: defaults, current: current)
         moved.prepare(hasSubscriptions: true, movedTopicsPending: true, now: now)
         XCTAssertTrue(moved.noticeShown)
         XCTAssertEqual(defaults.object(forKey: LaunchExperience.firstLaunchKey) as? Date,
@@ -6580,7 +6580,7 @@ final class LaunchExperiencePolicyTests: XCTestCase {
         XCTAssertTrue(moved.noticeShown)
 
         defaults.removeObject(forKey: LaunchExperience.seenKey)
-        let updated = LaunchExperience(defaults: defaults)
+        let updated = LaunchExperience(defaults: defaults, current: current)
         updated.prepare(hasSubscriptions: true, movedTopicsPending: false, now: now)
         updated.presentWhatsNew()
         XCTAssertTrue(updated.showingWhatsNew)
