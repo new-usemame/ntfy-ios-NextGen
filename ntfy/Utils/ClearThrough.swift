@@ -6,6 +6,7 @@ struct ClearThroughIntent {
     let boundary: ClearRequest
     let candidates: [ClearRequest]
     let known: [ClearRequest]
+    var healthKey: String? = nil
 }
 
 enum ClearThroughResult { case sent, fallback, deferred }
@@ -97,7 +98,8 @@ final class ClearThroughCoordinator {
 
     private func publish(_ work: Work) {
         guard current(work) else { return }
-        guard cooldown.claim(server: work.boundary.baseUrl, manual: false, kind: .clearThrough) else { deferWork(work, failure: .rateLimited); return }
+        guard let attempt = cooldown.claimAttempt(server: work.boundary.baseUrl,
+            manual: work.retries == 0 && cooldown.hasNonTimeRefusal(server: work.boundary.baseUrl, kind: .clearThrough), kind: .clearThrough) else { deferWork(work, failure: .rateLimited); return }
         guard let request = request(for: work.boundary) else { finish(work, .fallback); return }
         transport(request) { data, response, error in
             self.queue.async {
@@ -109,6 +111,7 @@ final class ClearThroughCoordinator {
                     struct Receipt: Decodable { let cleared: Int; let through_id: String }
                     if let data, let receipt = try? JSONDecoder().decode(Receipt.self, from: data),
                        receipt.through_id == work.boundary.messageId, (0...100).contains(receipt.cleared) {
+                        self.cooldown.succeeded(server: work.boundary.baseUrl, attempt: attempt)
                         self.finish(work, .sent)
                     } else { self.poll(work) }
                 case 404, 405:
@@ -193,7 +196,7 @@ final class ClearThroughCoordinator {
     }
     private func deferWork(_ work: Work, failure: PollFailure) {
         Foundation.NotificationCenter.default.post(name: Self.didFail, object: nil,
-            userInfo: ["baseUrl": work.boundary.baseUrl, "topic": work.boundary.topic, "failure": failure])
+            userInfo: ["baseUrl": work.boundary.baseUrl, "topic": work.boundary.topic, "failure": failure, "subscriptionKey": work.intent.healthKey ?? ""])
         // Keep the eventual success callback: a later ordinary poll may prove the transaction
         // committed, and self-hosted devices still need their one upstream wake after that proof.
         reportDeferred(work)

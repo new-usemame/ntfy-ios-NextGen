@@ -242,7 +242,13 @@ final class RelayCheckTests: XCTestCase {
                 host.view.layoutIfNeeded()
                 RunLoop.main.run(until: Date().addingTimeInterval(0.35))
                 let scroll = scrollViews(host.view).first
-                let offsets: [CGFloat] = variant == "largest-text" ? [0, max(0, (scroll?.contentSize.height ?? 0) - (scroll?.bounds.height ?? 0))] : [0]
+                let bottom = max(0, (scroll?.contentSize.height ?? 0) - (scroll?.bounds.height ?? 0))
+                let step = max(100, (scroll?.bounds.height ?? 600) * 0.7)
+                var offsets: [CGFloat] = [0]
+                if variant == "largest-text", bottom > 0 {
+                    offsets += Array(stride(from: step, to: bottom, by: step))
+                    offsets.append(bottom)
+                }
                 for (page, offset) in offsets.enumerated() {
                     scroll?.setContentOffset(CGPoint(x: 0, y: offset), animated: false)
                     RunLoop.main.run(until: Date().addingTimeInterval(0.1))

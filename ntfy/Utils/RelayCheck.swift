@@ -37,7 +37,7 @@ final class RelayCheck: ObservableObject {
         enum CodingKeys: String, CodingKey {
             case relayed, relayedAt = "relayed_at", windowSeconds = "window_seconds"
         }
-        var isValid: Bool { windowSeconds > 0 && (relayed ? (relayedAt ?? 0) > 0 : relayedAt == nil) }
+        var isValid: Bool { windowSeconds == 120 && (relayed ? (relayedAt ?? 0) > 0 : relayedAt == nil) }
     }
 
     typealias Read = (URLRequest, @escaping (Data?, HTTPURLResponse?, Error?) -> Void) -> Void
@@ -50,6 +50,7 @@ final class RelayCheck: ObservableObject {
     private let cooldown: ServerCooldown?
     private var generation = UUID()
     private var nextAllowed: TimeInterval = 0
+    private var baselineRead = true
     private var baseline: Int64?
     private var hash = ""
     private var session: URLSession?
@@ -95,12 +96,13 @@ final class RelayCheck: ObservableObject {
 
     func prepare(baseUrl: String, topic: String) {
         guard !state.isBusy, ProcessInfo.processInfo.systemUptime >= nextAllowed else { return }
-        if let cooldown, !cooldown.claim(server: relayBaseUrl, manual: false, kind: .relay) {
+        if let cooldown, !cooldown.claim(server: relayBaseUrl, manual: true, kind: .relay, consumingProbe: false) {
             state = .failed("The relay is pausing requests after a rate limit. Wait for the requested delay or the relevant server or request change before trying again.")
             return
         }
         generation = UUID()
         baseline = nil
+        baselineRead = true
         guard Self.isSecureBase(baseUrl), Self.isSecureBase(relayBaseUrl), !topic.isEmpty else {
             state = .failed("An automatic relay check requires HTTPS for both your topic server and the relay. No test message was sent.")
             return
@@ -171,11 +173,12 @@ final class RelayCheck: ObservableObject {
     private func lookup(id: UUID, completion: @escaping (Snapshot) -> Void) {
         guard generation == id,
               let url = URL(string: relayBaseUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/v1/ntfyme/relay-check") else { return }
-        let attempt = cooldown?.claimAttempt(server: relayBaseUrl, manual: false, kind: .relay)
+        let attempt = cooldown?.claimAttempt(server: relayBaseUrl, manual: baselineRead, kind: .relay)
         guard cooldown == nil || attempt != nil else {
             state = .failed("The relay is pausing requests after a rate limit. Wait for the requested delay or the relevant server or request change before trying again.")
             return
         }
+        baselineRead = false
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

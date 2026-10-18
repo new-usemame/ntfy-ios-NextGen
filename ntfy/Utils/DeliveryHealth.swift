@@ -242,11 +242,11 @@ final class ServerCooldown {
         return max(Date(timeIntervalSince1970: until[key] ?? 0), now().addingTimeInterval(remaining))
     }
 
-    func claim(server: String, manual: Bool, kind: Kind = .poll) -> Bool {
-        claimAttempt(server: server, manual: manual, kind: kind) != nil
+    func claim(server: String, manual: Bool, kind: Kind = .poll, consumingProbe: Bool = true) -> Bool {
+        claimAttempt(server: server, manual: manual, kind: kind, consumingProbe: consumingProbe) != nil
     }
 
-    func claimAttempt(server: String, manual: Bool, kind: Kind = .poll) -> Attempt? {
+    func claimAttempt(server: String, manual: Bool, kind: Kind = .poll, consumingProbe: Bool = true) -> Attempt? {
         lock.lock(); defer { lock.unlock() }
         let server = normalizeBaseUrl(server)
         let date = now().timeIntervalSince1970
@@ -256,8 +256,10 @@ final class ServerCooldown {
         if extensionWait { return nil }
         if changes[scope(server, kind)] != nil || (until[server] ?? 0) > date {
             guard manual, date - (probes[server] ?? 0) >= 60 else { return nil }
-            probes[server] = date
-            defaults?.set(probes, forKey: probeKey)
+            if consumingProbe {
+                probes[server] = date
+                defaults?.set(probes, forKey: probeKey)
+            }
         }
         return Attempt(generation: generations[server], kind: kind)
     }
@@ -290,6 +292,12 @@ final class ServerCooldown {
             max(until[server] ?? 0, date.addingTimeInterval(delay).timeIntervalSince1970))
         until = until.filter { $0.value > date.timeIntervalSince1970 }
         defaults?.set(until, forKey: key)
+    }
+
+    func hasNonTimeRefusal(server: String, kind: Kind) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let server = normalizeBaseUrl(server)
+        return changes[scope(server, kind)] != nil && (until[server] ?? 0) <= now().timeIntervalSince1970
     }
 
     /// A new explicit read intent may change an oversized batch. Scheduled retries never call

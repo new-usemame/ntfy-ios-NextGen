@@ -83,7 +83,7 @@ final class ServerCapabilitiesCache {
         guard let url = URL(string: "\(baseUrl)/v1/ntfyme/capabilities"),
               url.scheme?.lowercased() == "https" || (allowInsecureLoopback && url.scheme == "http" && ["127.0.0.1", "::1", "[::1]"].contains(url.host ?? "")),
               url.user == nil, url.password == nil, url.query == nil, url.fragment == nil,
-              cooldown.claim(server: baseUrl, manual: false, kind: .discovery) else {
+              let attempt = cooldown.claimAttempt(server: baseUrl, manual: true, kind: .discovery) else {
             finish(baseUrl, generation: generation, value: .unsupported); return
         }
         var request = api.newRequest(url: url, baseUrl: baseUrl, user: user)
@@ -97,6 +97,7 @@ final class ServerCapabilitiesCache {
             }
             let valid = error == nil && http?.statusCode == 200 && http?.url == url
                 && http?.mimeType?.lowercased() == "application/json"
+            if valid { self.cooldown.succeeded(server: baseUrl, attempt: attempt) }
             let value = valid ? data.map(ServerCapabilities.decode) ?? .unsupported : .unsupported
             self.finish(baseUrl, generation: generation, value: value)
         }

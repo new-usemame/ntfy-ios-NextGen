@@ -440,6 +440,7 @@ final class ClearPacer {
     func send(_ requests: [ClearRequest], via publish: @escaping Publish, first: Bool = false,
               done: @escaping (ClearRequest, Bool) -> Void) {
         lock.lock()
+        for request in requests { cooldown.requestChanged(server: request.baseUrl, kind: .clear) }
         let items = requests.map { request in Item(request: request, publish: publish, first: first) { done(request, $0) } }
         if first { pending.insert(contentsOf: items, at: 0) } else { pending += items }
         var overflow: [Item] = []
@@ -455,8 +456,8 @@ final class ClearPacer {
     private func pump() {
         lock.lock()
         let now = now()
-        let paused = pending.filter { !cooldown.claim(server: $0.server, manual: false, kind: .clear) }
-        pending.removeAll { !cooldown.claim(server: $0.server, manual: false, kind: .clear) }
+        let paused = pending.filter { !cooldown.claim(server: $0.server, manual: cooldown.hasNonTimeRefusal(server: $0.server, kind: .clear), kind: .clear, consumingProbe: false) }
+        pending.removeAll { !cooldown.claim(server: $0.server, manual: cooldown.hasNonTimeRefusal(server: $0.server, kind: .clear), kind: .clear, consumingProbe: false) }
         guard !busy, !pending.isEmpty else { lock.unlock(); paused.forEach { $0.done(false) }; return }
         busy = true
         let wait = lastStart.addingTimeInterval(Self.spacing).timeIntervalSince(now)
@@ -467,6 +468,15 @@ final class ClearPacer {
             return
         }
         let item = pending.removeFirst()
+        guard let attempt = cooldown.claimAttempt(server: item.server,
+            manual: cooldown.hasNonTimeRefusal(server: item.server, kind: .clear), kind: .clear) else {
+            busy = false
+            lock.unlock()
+            paused.forEach { $0.done(false) }
+            item.done(false)
+            pump()
+            return
+        }
         lastStart = now
         lock.unlock()
         paused.forEach { $0.done(false) }
@@ -474,6 +484,7 @@ final class ClearPacer {
             lock.lock()
             busy = false
             var dropped: [Item] = []
+            if outcome == .sent { cooldown.succeeded(server: item.server, attempt: attempt) }
             if case .rateLimited(let retryAfter) = outcome {
                 let header = retryAfter.isFinite && retryAfter >= 0 ? String(Int(min(retryAfter, 3600))) : nil
                 cooldown.limit(server: item.server, retryAfter: header, kind: .clear)

@@ -102,6 +102,33 @@ final class ServerContractTests: XCTestCase {
         XCTAssertTrue(cooldown.claim(server: "https://s.invalid", manual: false), "a refused clear must not starve admissible GET polls")
     }
 
+    func testExplicitClearCanProbeChangedServerStateWithoutChangingStockBrake() {
+        var date = Date(timeIntervalSince1970: 1_700_000_000)
+        let cooldown = ServerCooldown(defaults: nil, now: { date })
+        let pacer = ClearPacer(cooldown: cooldown)
+        pacer.now = { date }
+        let request = ClearRequest(baseUrl: "https://clear-probe.invalid", topic: "topic", sequence: "id", user: nil)
+        pacer.send([request], via: { _, done in done(.conditionLimited(.stateChange)) }) { _, _ in }
+        date += 60
+        var sent = 0
+        pacer.send([request], via: { _, done in sent += 1; done(.sent) }) { _, success in XCTAssertTrue(success) }
+        XCTAssertEqual(sent, 1)
+        XCTAssertTrue(cooldown.claim(server: request.baseUrl, manual: false, kind: .clear))
+        cooldown.limit(server: request.baseUrl, retryAfter: "600")
+        date += 60
+        pacer.send([request], via: { _, _ in XCTFail("stock timed brake still drops queued clears") }) { _, success in XCTAssertFalse(success) }
+    }
+
+    func testNonTimeManualGateCanBeInspectedBeforeConsumingOneProbe() {
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        let cooldown = ServerCooldown(defaults: nil, now: { date })
+        cooldown.limit(server: "https://relay-probe.invalid", retryAfter: nil, condition: "state-change", kind: .relay)
+        XCTAssertTrue(cooldown.claim(server: "https://relay-probe.invalid", manual: true, kind: .relay, consumingProbe: false))
+        XCTAssertTrue(cooldown.claim(server: "https://relay-probe.invalid", manual: true, kind: .relay))
+        XCTAssertFalse(cooldown.claim(server: "https://relay-probe.invalid", manual: true, kind: .relay))
+        XCTAssertFalse(cooldown.claim(server: "https://relay-probe.invalid", manual: false, kind: .relay))
+    }
+
     func testBulkAuthFailureAppearsInTopicHealth() {
         let store = Store(inMemory: true)
         let subscription = store.saveSubscription(baseUrl: "https://auth-health.invalid", topic: "topic")

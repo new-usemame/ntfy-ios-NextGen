@@ -24,7 +24,9 @@ final class DeliveryHealthMonitor: ObservableObject {
             guard let self, let base = note.userInfo?["baseUrl"] as? String,
                   let topic = note.userInfo?["topic"] as? String, let failure = note.userInfo?["failure"] as? PollFailure else { return }
             let identity = DeliveryReceipt.identity(baseUrl: base, topic: topic)
-            for (key, value) in self.identities where value == identity { self.record(key: key, failure: failure) }
+            let explicitKey = note.userInfo?["subscriptionKey"] as? String
+            if let explicitKey, !explicitKey.isEmpty { self.record(key: explicitKey, failure: failure) }
+            for (key, value) in self.identities where value == identity && key != explicitKey { self.record(key: key, failure: failure) }
         })
         for name in [Store.didChangeRemotely, DeliveryReceipt.changed] {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in

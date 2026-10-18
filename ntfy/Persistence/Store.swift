@@ -571,7 +571,7 @@ class Store: ObservableObject {
                 let newest = read ? try context.fetch(request) : []
                 let clears = newest.compactMap { clearRequest(for: $0) }
                 let throughTime = newest.first?.time
-                let bulkIntent = read ? clearThroughIntent(newest: newest, fallback: clears, predicate: predicate) : nil
+                let bulkIntent = read ? clearThroughIntent(newest: newest, fallback: clears, subscription: subscription, predicate: predicate) : nil
                 if context.hasChanges { try context.save() }
                 let update = NSBatchUpdateRequest(entityName: "Notification")
                 update.predicate = predicate
@@ -708,7 +708,7 @@ class Store: ObservableObject {
 
     /// Materialize only the legacy fallback cap. Retain bounded metadata for EVERY newly read
     /// row, so a poll containing ten clears cannot incorrectly settle a larger topic-wide intent.
-    private func clearThroughIntent(newest: [Notification], fallback: [ClearRequest],
+    private func clearThroughIntent(newest: [Notification], fallback: [ClearRequest], subscription: Subscription,
                                     predicate: NSPredicate) -> ClearThroughIntent? {
         guard clearThrough != nil, let boundary = fallback.first, ClearThroughCoordinator.valid(boundary),
               let time = newest.first?.time else { return nil }
@@ -727,7 +727,7 @@ class Store: ObservableObject {
             return snapshot
         }
         guard !candidates.isEmpty, known.count == rows.count else { return nil }
-        return ClearThroughIntent(boundary: boundary, candidates: candidates, known: known)
+        return ClearThroughIntent(boundary: boundary, candidates: candidates, known: known, healthKey: subscription.objectID.uriRepresentation().absoluteString)
     }
 
     private func wakeAfterBulk(_ request: ClearRequest) {
