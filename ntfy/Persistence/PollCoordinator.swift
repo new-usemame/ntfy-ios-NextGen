@@ -20,6 +20,12 @@ final class DeliveryHealthMonitor: ObservableObject {
                     DispatchQueue.main.async { DeliveryHealthMonitor.shared.refreshReceipts() }
                 }, DeliveryReceipt.externalChanged as CFString, nil, .deliverImmediately)
         }
+        observers.append(NotificationCenter.default.addObserver(forName: ClearThroughCoordinator.didFail, object: nil, queue: .main) { [weak self] note in
+            guard let self, let base = note.userInfo?["baseUrl"] as? String,
+                  let topic = note.userInfo?["topic"] as? String, let failure = note.userInfo?["failure"] as? PollFailure else { return }
+            let identity = DeliveryReceipt.identity(baseUrl: base, topic: topic)
+            for (key, value) in self.identities where value == identity { self.record(key: key, failure: failure) }
+        })
         for name in [Store.didChangeRemotely, DeliveryReceipt.changed] {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 self?.refreshReceipts()

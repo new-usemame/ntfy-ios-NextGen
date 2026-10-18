@@ -61,6 +61,32 @@ final class ServerContractTests: XCTestCase {
         }
     }
 
+    func testSubscriptionManagerCarriesConditionIntoSharedPollBrake() {
+        let store = Store(inMemory: true)
+        let subscription = store.saveSubscription(baseUrl: "https://condition.invalid", topic: "topic")
+        var clock = Date(timeIntervalSince1970: 1_700_000_000)
+        let polling = PollCoordinator(defaults: nil, now: { clock })
+        var manager = SubscriptionManager(store: store, polling: polling)
+        var fetches = 0
+        manager.fetch = { _, done in
+            fetches += 1
+            done(nil, PollHTTPError(status: 429, retryAfter: nil, retryCondition: "state-change"))
+        }
+        manager.pollWithOutcome(subscription) { XCTAssertTrue($0.attempted) }
+        clock += 7200
+        manager.pollWithOutcome(subscription) { XCTAssertFalse($0.attempted) }
+        XCTAssertEqual(fetches, 1)
+    }
+
+    func testNewTimeConditionAfterExplicitStateProbeCanRecover() {
+        var clock: TimeInterval = 0
+        let cooldown = ServerCooldown(defaults: nil, uptime: { clock })
+        cooldown.limit(server: "https://s.invalid", retryAfter: nil, condition: "state-change")
+        cooldown.limit(server: "https://s.invalid", retryAfter: "10", condition: "time")
+        clock = 10
+        XCTAssertTrue(cooldown.claim(server: "https://s.invalid", manual: false))
+    }
+
     func testConditionClearStopsQueuedRequestsOnThatServer() {
         let cooldown = ServerCooldown(defaults: nil)
         let pacer = ClearPacer(cooldown: cooldown)
@@ -72,7 +98,48 @@ final class ServerContractTests: XCTestCase {
         complete?(.conditionLimited(.stateChange))
         XCTAssertEqual(sent, 1)
         XCTAssertEqual(finished, 3)
-        XCTAssertFalse(cooldown.claim(server: "https://s.invalid", manual: false))
+        XCTAssertFalse(cooldown.claim(server: "https://s.invalid", manual: false, kind: .clear))
+        XCTAssertTrue(cooldown.claim(server: "https://s.invalid", manual: false), "a refused clear must not starve admissible GET polls")
+    }
+
+    func testBulkAuthFailureAppearsInTopicHealth() {
+        let store = Store(inMemory: true)
+        let subscription = store.saveSubscription(baseUrl: "https://auth-health.invalid", topic: "topic")
+        let request = store.pollRequest(for: subscription)!
+        let monitor = DeliveryHealthMonitor()
+        monitor.register(request)
+        NotificationCenter.default.post(name: ClearThroughCoordinator.didFail, object: nil,
+            userInfo: ["baseUrl": request.baseUrl, "topic": "topic", "failure": PollFailure.unauthorized])
+        XCTAssertEqual(monitor.topics[subscription.objectID.uriRepresentation().absoluteString]?.failure, .unauthorized)
+    }
+
+    func testDiscoveryRequiresHTTPSAndKeepsTimedGateAcrossCacheInstances() {
+        let cooldown = ServerCooldown(defaults: nil)
+        var sends = 0
+        func cache() -> ServerCapabilitiesCache {
+            ServerCapabilitiesCache(cooldown: cooldown, transport: { request, done in
+                sends += 1
+                done(nil, HTTPURLResponse(url: request.url!, statusCode: 429, httpVersion: nil,
+                    headerFields: ["Retry-After-Condition": "time", "Retry-After": "72000"]), nil)
+            })
+        }
+        cache().discover(baseUrl: "http://self-host.invalid") { XCTAssertEqual($0, .unsupported) }
+        XCTAssertEqual(sends, 0)
+        cache().discover(baseUrl: "https://rate-discovery.invalid") { XCTAssertEqual($0, .unsupported) }
+        XCTAssertEqual(sends, 1)
+        cache().discover(baseUrl: "https://rate-discovery.invalid") { XCTAssertEqual($0, .unsupported) }
+        XCTAssertEqual(sends, 1)
+    }
+
+    func testNonTimeBrakeScopesRequestChangesWhileTimedBrakeIsShared() {
+        let cooldown = ServerCooldown(defaults: nil)
+        cooldown.limit(server: "https://s.invalid", retryAfter: nil, condition: "request-change", kind: .clearThrough)
+        XCTAssertFalse(cooldown.claim(server: "https://s.invalid", manual: false, kind: .clearThrough))
+        XCTAssertTrue(cooldown.claim(server: "https://s.invalid", manual: false, kind: .poll))
+        cooldown.requestChanged(server: "https://s.invalid", kind: .clearThrough)
+        XCTAssertTrue(cooldown.claim(server: "https://s.invalid", manual: false, kind: .clearThrough))
+        cooldown.limit(server: "https://s.invalid", retryAfter: "72000", condition: "time", kind: .clearThrough)
+        XCTAssertFalse(cooldown.claim(server: "https://s.invalid", manual: true, kind: .poll))
     }
 
     func testCapabilitiesExplicitVersionsAndLimits() {
@@ -160,7 +227,10 @@ final class NativeServerContractTests: XCTestCase {
         }
         for item in cases {
             let done = expectation(description: "native \(item.condition)")
-            ApiService().poll(baseUrl: item.url, topic: "audit-contract", messageId: "AbCdEf123456", user: nil) { _, error in
+            let store = Store(inMemory: true)
+            let subscription = store.saveSubscription(baseUrl: item.url, topic: "audit-contract")
+            let request = try XCTUnwrap(store.pollRequest(for: subscription))
+            ApiService().poll(request) { _, error in
                 let error = error as? PollHTTPError
                 XCTAssertEqual(error?.status, 429)
                 XCTAssertEqual(error?.retryCondition, item.condition.isEmpty ? nil : item.condition)

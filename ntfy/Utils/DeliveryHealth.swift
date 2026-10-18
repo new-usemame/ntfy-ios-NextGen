@@ -187,7 +187,8 @@ struct PollTiming {
 
 
 /// One server brake shared by polls and clears. Only deadlines and the last manual probe persist.
-/// A bad persisted/header deadline is bounded to an hour. Manual probes are at most once a minute.
+/// Stock deadlines remain capped at one hour; recognized extension resets preserve their full delay.
+/// Explicit probes of non-time refusals are at most once a minute.
 final class ServerCooldown {
     static let shared = ServerCooldown(defaults: UserDefaults(suiteName: Store.appGroup) ?? .standard)
     private let lock = NSLock()
@@ -205,7 +206,9 @@ final class ServerCooldown {
     private let extendedKey = "serverExtensionCooldowns118"
     private let changeKey = "serverExtensionChanges118"
     // No request survives a launch; only the deadlines and manual-probe pacing need persistence.
-    struct Attempt { fileprivate let generation: UUID? }
+    enum Kind: String { case poll, clear, clearThrough, relay, discovery }
+    struct Attempt { fileprivate let generation: UUID?; fileprivate let kind: Kind }
+    private func scope(_ server: String, _ kind: Kind) -> String { server + "|118|" + kind.rawValue }
     private var generations: [String: UUID] = [:]
 
     init(defaults: UserDefaults?, now: @escaping () -> Date = Date.init,
@@ -226,24 +229,24 @@ final class ServerCooldown {
             .filter { ["state-change", "request-change"].contains($0.value) }
         monotonic = extended.mapValues { uptime() + $0 - date }
         generations = until.merging(extended) { max($0, $1) }.mapValues { _ in UUID() }
-        for server in changes.keys { generations[server] = UUID() }
+        for key in changes.keys { generations[key.components(separatedBy: "|118|")[0]] = UUID() }
         defaults?.set(until, forKey: key)
         defaults?.set(probes, forKey: probeKey)
     }
 
-    func deadline(for server: String) -> Date {
+    func deadline(for server: String, kind: Kind = .poll) -> Date {
         lock.lock(); defer { lock.unlock() }
         let key = normalizeBaseUrl(server)
-        if changes[key] != nil { return .distantFuture }
+        if changes[scope(key, kind)] != nil { return .distantFuture }
         let remaining = max(0, (monotonic[key] ?? 0) - uptime())
         return max(Date(timeIntervalSince1970: until[key] ?? 0), now().addingTimeInterval(remaining))
     }
 
-    func claim(server: String, manual: Bool) -> Bool {
-        claimAttempt(server: server, manual: manual) != nil
+    func claim(server: String, manual: Bool, kind: Kind = .poll) -> Bool {
+        claimAttempt(server: server, manual: manual, kind: kind) != nil
     }
 
-    func claimAttempt(server: String, manual: Bool) -> Attempt? {
+    func claimAttempt(server: String, manual: Bool, kind: Kind = .poll) -> Attempt? {
         lock.lock(); defer { lock.unlock() }
         let server = normalizeBaseUrl(server)
         let date = now().timeIntervalSince1970
@@ -251,15 +254,15 @@ final class ServerCooldown {
         // Explicit user probes may test a changed state/request, paced as in 1.17. Automatic
         // polling/clearing never resumes on a short timer for a non-time condition.
         if extensionWait { return nil }
-        if changes[server] != nil || (until[server] ?? 0) > date {
+        if changes[scope(server, kind)] != nil || (until[server] ?? 0) > date {
             guard manual, date - (probes[server] ?? 0) >= 60 else { return nil }
             probes[server] = date
             defaults?.set(probes, forKey: probeKey)
         }
-        return Attempt(generation: generations[server])
+        return Attempt(generation: generations[server], kind: kind)
     }
 
-    func limit(server: String, retryAfter: String?, condition: String? = nil) {
+    func limit(server: String, retryAfter: String?, condition: String? = nil, kind: Kind = .poll) {
         lock.lock(); defer { lock.unlock() }
         let server = normalizeBaseUrl(server)
         let date = now()
@@ -267,11 +270,12 @@ final class ServerCooldown {
         if let directive = RetryDirective.parse(condition: condition, retryAfter: retryAfter, now: date) {
             switch directive {
             case .time(let seconds):
+                changes.removeValue(forKey: scope(server, kind))
                 let delay = max(1, seconds)
                 monotonic[server] = max(monotonic[server] ?? 0, uptime() + delay)
                 extended[server] = max(extended[server] ?? 0, date.timeIntervalSince1970 + delay)
-            case .stateChange: changes[server] = "state-change"
-            case .requestChange: changes[server] = "request-change"
+            case .stateChange: changes[scope(server, kind)] = "state-change"
+            case .requestChange: changes[scope(server, kind)] = "request-change"
             }
             defaults?.set(extended, forKey: extendedKey)
             defaults?.set(changes, forKey: changeKey)
@@ -288,6 +292,17 @@ final class ServerCooldown {
         defaults?.set(until, forKey: key)
     }
 
+    /// A new explicit read intent may change an oversized batch. Scheduled retries never call
+    /// this; unrelated GET polls remain useful while a clear requires a different request.
+    func requestChanged(server: String, kind: Kind) {
+        lock.lock(); defer { lock.unlock() }
+        let key = scope(normalizeBaseUrl(server), kind)
+        if changes[key] == "request-change" {
+            changes.removeValue(forKey: key)
+            defaults?.set(changes, forKey: changeKey)
+        }
+    }
+
     func succeeded(server: String, attempt: Attempt) {
         lock.lock(); defer { lock.unlock() }
         let server = normalizeBaseUrl(server)
@@ -296,7 +311,7 @@ final class ServerCooldown {
         until.removeValue(forKey: server)
         extended.removeValue(forKey: server)
         monotonic.removeValue(forKey: server)
-        changes.removeValue(forKey: server)
+        changes.removeValue(forKey: scope(server, attempt.kind))
         defaults?.set(extended, forKey: extendedKey)
         defaults?.set(changes, forKey: changeKey)
         failures.removeValue(forKey: server)

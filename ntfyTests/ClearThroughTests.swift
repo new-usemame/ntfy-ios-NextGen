@@ -83,7 +83,7 @@ final class ClearThroughTests: XCTestCase {
             coordinator.send(intent()) { result in
                 guard case .deferred = result else { return XCTFail("failure must not fan out") }
                 XCTAssertEqual(sends, 1)
-                if status == 429 { XCTAssertFalse(cooldown.claim(server: self.base, manual: false)) }
+                if status == 429 { XCTAssertFalse(cooldown.claim(server: self.base, manual: false, kind: .clearThrough)) }
                 finished.fulfill()
             }
             wait(for: [finished], timeout: 2)

@@ -52,6 +52,7 @@ final class ClearThroughCoordinator {
     func send(_ intent: ClearThroughIntent, completion: @escaping (ClearThroughResult) -> Void) {
         queue.async {
             self.prune()
+            self.cooldown.requestChanged(server: intent.boundary.baseUrl, kind: .clearThrough)
             let work = Work(intent, now: self.now(), completion: completion)
             if let old = self.pending.removeValue(forKey: work.key) { old.completion?(.deferred) }
             while self.pending.count >= Self.maxPending, let oldest = self.pending.min(by: { $0.value.created < $1.value.created })?.key {
@@ -95,7 +96,7 @@ final class ClearThroughCoordinator {
 
     private func publish(_ work: Work) {
         guard current(work) else { return }
-        guard cooldown.claim(server: work.boundary.baseUrl, manual: false) else { deferWork(work, failure: .rateLimited); return }
+        guard cooldown.claim(server: work.boundary.baseUrl, manual: false, kind: .clearThrough) else { deferWork(work, failure: .rateLimited); return }
         guard let request = request(for: work.boundary) else { finish(work, .fallback); return }
         transport(request) { data, response, error in
             self.queue.async {
@@ -115,7 +116,7 @@ final class ClearThroughCoordinator {
                 case 409: self.poll(work, missingBoundary: true)
                 case 429:
                     self.cooldown.limit(server: work.boundary.baseUrl, retryAfter: http?.value(forHTTPHeaderField: "Retry-After"),
-                                        condition: http?.value(forHTTPHeaderField: "Retry-After-Condition"))
+                                        condition: http?.value(forHTTPHeaderField: "Retry-After-Condition"), kind: .clearThrough)
                     self.deferWork(work, failure: .rateLimited)
                 case 401, 403: self.deferWork(work, failure: .unauthorized)
                 case 400: self.deferWork(work, failure: .other)
@@ -128,7 +129,7 @@ final class ClearThroughCoordinator {
 
     private func poll(_ work: Work, selectingBoundary: Bool = false, missingBoundary: Bool = false) {
         guard current(work) else { return }
-        guard cooldown.claim(server: work.boundary.baseUrl, manual: false) else { deferWork(work, failure: .rateLimited); return }
+        guard cooldown.claim(server: work.boundary.baseUrl, manual: false, kind: .clearThrough) else { deferWork(work, failure: .rateLimited); return }
         guard let url = URL(string: "\(topicUrl(baseUrl: work.boundary.baseUrl, topic: work.boundary.topic))/json?poll=1&since=all") else {
             deferWork(work, failure: .other); return
         }
@@ -141,7 +142,7 @@ final class ClearThroughCoordinator {
                       let messages = Self.messages(data) else {
                     if http?.statusCode == 429 {
                         self.cooldown.limit(server: work.boundary.baseUrl, retryAfter: http?.value(forHTTPHeaderField: "Retry-After"),
-                                            condition: http?.value(forHTTPHeaderField: "Retry-After-Condition"))
+                                            condition: http?.value(forHTTPHeaderField: "Retry-After-Condition"), kind: .clearThrough)
                     }
                     let failure: PollFailure = [401, 403].contains(http?.statusCode ?? 0) ? .unauthorized
                         : http?.statusCode == 429 ? .rateLimited : error != nil ? .unreachable : .other

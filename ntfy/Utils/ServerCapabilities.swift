@@ -53,10 +53,12 @@ final class ServerCapabilitiesCache {
     private let now: () -> TimeInterval
     private let transport: Transport
     private let api: ApiService
+    private let cooldown: ServerCooldown
+    private let allowInsecureLoopback: Bool
 
-    init(api: ApiService = .shared, now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+    init(api: ApiService = .shared, cooldown: ServerCooldown = .shared, allowInsecureLoopback: Bool = false, now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
          transport: @escaping Transport = { ServerExtensionTransport.shared.send($0, completion: $1) }) {
-        self.api = api; self.now = now; self.transport = transport
+        self.api = api; self.cooldown = cooldown; self.allowInsecureLoopback = allowInsecureLoopback; self.now = now; self.transport = transport
     }
 
     func invalidate(baseUrl: String) {
@@ -78,8 +80,10 @@ final class ServerCapabilitiesCache {
         let generation = UUID()
         generations[baseUrl] = generation
         lock.unlock()
-        guard let url = URL(string: "\(baseUrl)/v1/ntfyme/capabilities"), ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
-              url.user == nil, url.password == nil else {
+        guard let url = URL(string: "\(baseUrl)/v1/ntfyme/capabilities"),
+              url.scheme?.lowercased() == "https" || (allowInsecureLoopback && url.scheme == "http" && ["127.0.0.1", "::1", "[::1]"].contains(url.host ?? "")),
+              url.user == nil, url.password == nil, url.query == nil, url.fragment == nil,
+              cooldown.claim(server: baseUrl, manual: false, kind: .discovery) else {
             finish(baseUrl, generation: generation, value: .unsupported); return
         }
         var request = api.newRequest(url: url, baseUrl: baseUrl, user: user)
@@ -87,6 +91,10 @@ final class ServerCapabilitiesCache {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         transport(request) { data, response, error in
             let http = response as? HTTPURLResponse
+            if http?.statusCode == 429 {
+                self.cooldown.limit(server: baseUrl, retryAfter: http?.value(forHTTPHeaderField: "Retry-After"),
+                    condition: http?.value(forHTTPHeaderField: "Retry-After-Condition"), kind: .discovery)
+            }
             let valid = error == nil && http?.statusCode == 200 && http?.url == url
                 && http?.mimeType?.lowercased() == "application/json"
             let value = valid ? data.map(ServerCapabilities.decode) ?? .unsupported : .unsupported

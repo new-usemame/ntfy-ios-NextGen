@@ -455,8 +455,8 @@ final class ClearPacer {
     private func pump() {
         lock.lock()
         let now = now()
-        let paused = pending.filter { !cooldown.claim(server: $0.server, manual: false) }
-        pending.removeAll { !cooldown.claim(server: $0.server, manual: false) }
+        let paused = pending.filter { !cooldown.claim(server: $0.server, manual: false, kind: .clear) }
+        pending.removeAll { !cooldown.claim(server: $0.server, manual: false, kind: .clear) }
         guard !busy, !pending.isEmpty else { lock.unlock(); paused.forEach { $0.done(false) }; return }
         busy = true
         let wait = lastStart.addingTimeInterval(Self.spacing).timeIntervalSince(now)
@@ -476,15 +476,15 @@ final class ClearPacer {
             var dropped: [Item] = []
             if case .rateLimited(let retryAfter) = outcome {
                 let header = retryAfter.isFinite && retryAfter >= 0 ? String(Int(min(retryAfter, 3600))) : nil
-                cooldown.limit(server: item.server, retryAfter: header)
+                cooldown.limit(server: item.server, retryAfter: header, kind: .clear)
                 dropped = pending.filter { $0.server == item.server }
                 pending.removeAll { $0.server == item.server }
             }
             if case .conditionLimited(let directive) = outcome {
                 switch directive {
-                case .time(let delay): cooldown.limit(server: item.server, retryAfter: String(format: "%.0f", ceil(delay)), condition: "time")
-                case .stateChange: cooldown.limit(server: item.server, retryAfter: nil, condition: "state-change")
-                case .requestChange: cooldown.limit(server: item.server, retryAfter: nil, condition: "request-change")
+                case .time(let delay): cooldown.limit(server: item.server, retryAfter: String(format: "%.0f", ceil(delay)), condition: "time", kind: .clear)
+                case .stateChange: cooldown.limit(server: item.server, retryAfter: nil, condition: "state-change", kind: .clear)
+                case .requestChange: cooldown.limit(server: item.server, retryAfter: nil, condition: "request-change", kind: .clear)
                 }
                 dropped = pending.filter { $0.server == item.server }
                 pending.removeAll { $0.server == item.server }
