@@ -21,8 +21,7 @@ final class RelayCheckTests: XCTestCase {
             let reply = self.replies.removeFirst()
             completion(Data(reply.1.utf8), HTTPURLResponse(url: request.url!, statusCode: reply.0,
                 httpVersion: "HTTP/1.1", headerFields: reply.2), nil)
-        }, schedule: { delay, action in self.delays.append(delay); self.pending.append(action) },
-        now: { Date(timeIntervalSince1970: 1792331000) })
+        }, schedule: { delay, action in self.delays.append(delay); self.pending.append(action) })
     }
     private func drain() {
         let tick = expectation(description: "main queue callbacks")
@@ -36,6 +35,7 @@ final class RelayCheckTests: XCTestCase {
     private func approve(_ check: RelayCheck, error: String? = nil) {
         check.approve { done in self.publishes += 1; done(error) }
         drain()
+        if delays.last == 0.002, !pending.isEmpty { advance() }
     }
     private func advance() { pending.removeFirst()(); drain() }
 
@@ -69,12 +69,22 @@ final class RelayCheckTests: XCTestCase {
         XCTAssertEqual(RelayCheck.topicHash(baseUrl: base, topic: "topic"), expected)
         XCTAssertNotEqual(expected, RelayCheck.topicHash(baseUrl: "https://example.com:8443/ntfy", topic: "topic"))
     }
+    func testPublishWaitsForMonotonicMillisecondBoundaryWithoutComparingDeviceClock() {
+        replies = [(200,json(stamp),[:])]
+        let check = make(); prepare(check)
+        check.approve { done in self.publishes += 1; done(nil) }
+        XCTAssertEqual(publishes, 0)
+        XCTAssertEqual(delays, [0.002])
+        advance()
+        XCTAssertEqual(publishes, 1)
+        XCTAssertEqual(delays, [0.002, 1])
+    }
     func testNewerTimestampStopsAfterFirstPostPublishRead() {
         replies = [(200,json(stamp),[:]), (200,json(stamp + 1),[:])]
         let check = make(); prepare(check); approve(check); advance()
         XCTAssertEqual(check.state, .received(stamp + 1))
         XCTAssertEqual(reads.count, 2); XCTAssertEqual(publishes, 1); XCTAssertTrue(pending.isEmpty)
-        XCTAssertEqual(delays, [1])
+        XCTAssertEqual(delays, [0.002, 1])
     }
     func testUnchangedBaselineDoesNotProveTestWasForwarded() {
         replies = Array(repeating: (200,json(stamp),[:]), count: 5)
@@ -82,7 +92,7 @@ final class RelayCheckTests: XCTestCase {
         for _ in 0..<4 { advance() }
         XCTAssertEqual(check.state, .notObserved)
         XCTAssertEqual(reads.count, 5); XCTAssertEqual(publishes, 1)
-        XCTAssertEqual(delays, [1, 2, 3, 4])
+        XCTAssertEqual(delays, [0.002, 1, 2, 3, 4])
     }
     func testOlderTimestampAfterRestartDoesNotCountAsNewWake() {
         replies = [(200,json(stamp),[:])] + Array(repeating: (200,json(stamp - 1),[:]), count: 4)

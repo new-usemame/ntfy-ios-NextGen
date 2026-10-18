@@ -46,7 +46,6 @@ final class RelayCheck: ObservableObject {
     private let discover: (@escaping (Bool) -> Void) -> Void
     private let read: Read
     private let schedule: Schedule
-    private let now: () -> Date
     private let relayBaseUrl: String
     private var generation = UUID()
     private var nextAllowed: TimeInterval = 0
@@ -57,14 +56,12 @@ final class RelayCheck: ObservableObject {
     init(relayBaseUrl: String = Config.appBaseUrl,
          discover: ((@escaping (Bool) -> Void) -> Void)? = nil,
          read: Read? = nil,
-         schedule: @escaping Schedule = { delay, action in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action) },
-         now: @escaping () -> Date = Date.init) {
+         schedule: @escaping Schedule = { delay, action in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action) }) {
         self.relayBaseUrl = relayBaseUrl
         self.discover = discover ?? { completion in
             ServerCapabilitiesCache.shared.discover(baseUrl: relayBaseUrl, user: nil) { completion($0.relayCheck) }
         }
         self.schedule = schedule
-        self.now = now
         if let read { self.read = read } else {
             let config = URLSessionConfiguration.ephemeral
             config.httpShouldSetCookies = false
@@ -133,10 +130,15 @@ final class RelayCheck: ObservableObject {
 
     private func publishWhenDistinct(id: UUID, publish: @escaping (@escaping (String?) -> Void) -> Void) {
         guard generation == id else { return }
-        if baseline == Int64(now().timeIntervalSince1970 * 1000) {
-            schedule(0.002) { [weak self] in self?.publishWhenDistinct(id: id, publish: publish) }
-            return
+        // The baseline response follows the server's accepted wake. Let a monotonic timer
+        // cross a millisecond before publishing; comparing server and device clocks is unsafe.
+        schedule(0.002) { [weak self] in
+            guard let self, self.generation == id else { return }
+            self.publish(id: id, using: publish)
         }
+    }
+
+    private func publish(id: UUID, using publish: @escaping (@escaping (String?) -> Void) -> Void) {
         publish { [weak self] error in
             DispatchQueue.main.async {
                 guard let self, self.generation == id else { return }
