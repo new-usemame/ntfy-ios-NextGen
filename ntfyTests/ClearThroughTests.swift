@@ -227,7 +227,6 @@ final class ClearThroughTests: XCTestCase {
         let store = Store.shared
         let sub = store.saveSubscription(baseUrl: base, topic: "test-topic")
         defer { store.delete(subscription: sub); store.clearThrough = nil }
-        store.credentialStore = InMemoryCredentialStore()
         store.clearPublisher = { _, _ in XCTFail("advertised support uses one bulk request") }
         store.topicNotificationRemover = { _, _, _, _ in }
         store.wakePublisher = { _, done in done() }
@@ -258,7 +257,6 @@ final class ClearThroughTests: XCTestCase {
         let store = Store.shared
         let sub = store.saveSubscription(baseUrl: base, topic: "test-topic")
         defer { store.delete(subscription: sub); store.clearThrough = nil }
-        store.credentialStore = InMemoryCredentialStore()
         store.clearPublisher = { _, _ in XCTFail("bulk retry cannot fan out") }
         store.topicNotificationRemover = { _, _, _, _ in }
         let finished = expectation(description: "all read intent retained")

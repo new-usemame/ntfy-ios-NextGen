@@ -215,6 +215,7 @@ final class RelayCheckTests: XCTestCase {
         let window = UIWindow(windowScene: scene)
         window.frame = UIScreen.main.bounds
         let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("relay-screenshots")
+        if FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let states: [(String, RelayCheck.State)] = [
             ("idle", .idle), ("discovering", .discovering), ("consent", .consent),
@@ -242,24 +243,28 @@ final class RelayCheckTests: XCTestCase {
                 host.view.layoutIfNeeded()
                 RunLoop.main.run(until: Date().addingTimeInterval(0.35))
                 let scroll = scrollViews(host.view).first
-                let bottom = max(0, (scroll?.contentSize.height ?? 0) - (scroll?.bounds.height ?? 0))
-                let step = max(100, (scroll?.bounds.height ?? 600) * 0.7)
-                var offsets: [CGFloat] = [0]
-                if variant == "largest-text", bottom > 0 {
-                    offsets += Array(stride(from: step, to: bottom, by: step))
-                    offsets.append(bottom)
-                }
-                for (page, offset) in offsets.enumerated() {
+                // Form estimates off-screen cell heights. Recompute after each scroll so
+                // the largest-text result and setup paragraphs are captured all the way down.
+                var offset = -(scroll?.adjustedContentInset.top ?? 0)
+                for page in 0..<20 {
                     scroll?.setContentOffset(CGPoint(x: 0, y: offset), animated: false)
-                    RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+                    host.view.layoutIfNeeded()
                     let renderer = UIGraphicsImageRenderer(bounds: window.bounds)
                     let image = renderer.image { _ in window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) }
                     let data = try XCTUnwrap(image.jpegData(compressionQuality: 0.6))
                     try data.write(to: directory.appendingPathComponent("\(name)-\(variant)-\(page).jpg"))
+                    guard variant == "largest-text", let scroll else { break }
+                    let bottom = max(-scroll.adjustedContentInset.top,
+                        scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+                    if scroll.contentOffset.y >= bottom - 1 { break }
+                    offset = min(bottom, scroll.contentOffset.y + max(100, scroll.bounds.height * 0.65))
+                    XCTAssertLessThan(page, 19, "Visual capture must reach the actual form bottom")
                 }
             }
         }
         print("Relay visual evidence: \(directory.path)")
     }
+
 
 }
