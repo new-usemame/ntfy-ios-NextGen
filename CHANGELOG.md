@@ -20,6 +20,11 @@ into the App Store "What's New" field. Engineering detail and upstream tracking 
   Apple's approval, which this app doesn't have, so the switch never worked.
 - Swipe a message to mark it read or unread. Long-press a topic to pin it, mark it read or unsubscribe;
   a topic's ••• menu can pin it too. The topic list's swipe button now says Unsubscribe.
+- Settings → Notification history sets how long notifications are kept on this phone, with the same
+  choices as ntfy for Android. If you already used the app, it keeps everything until you choose a
+  limit; a new install keeps 30 days. Shortening it asks before deleting anything.
+- Topics with long histories open on their newest messages and load older ones as you scroll, and
+  each topic can be searched across its whole history.
 - Notification buttons can copy a value, such as a code, to the clipboard, and the app confirms with
   "Copied to Clipboard".
 - A new topic has a "Send a test notification" button, so you can see a notification arrive without a
