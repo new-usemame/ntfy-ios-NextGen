@@ -571,7 +571,7 @@ class Store: ObservableObject {
                 let newest = read ? try context.fetch(request) : []
                 let clears = newest.compactMap { clearRequest(for: $0) }
                 let throughTime = newest.first?.time
-                let bulkIntent = read ? clearThroughIntent(newest: newest, fallback: clears, subscription: subscription, predicate: predicate) : nil
+                let bulkIntent = read ? clearThroughIntent(newest: newest, fallback: clears, predicate: predicate) : nil
                 if context.hasChanges { try context.save() }
                 let update = NSBatchUpdateRequest(entityName: "Notification")
                 update.predicate = predicate
@@ -706,25 +706,28 @@ class Store: ObservableObject {
                             user: try? fetchUser(baseUrl: baseUrl)?.toBasicUser(credentialStore: credentialStore), messageId: id)
     }
 
-    /// Materialize only the existing fallback cap. A dictionary fetch resolves ties without
-    /// faulting thousands of Core Data rows or guessing server order from opaque IDs.
-    private func clearThroughIntent(newest: [Notification], fallback: [ClearRequest], subscription: Subscription,
+    /// Materialize only the legacy fallback cap. Retain bounded metadata for EVERY newly read
+    /// row, so a poll containing ten clears cannot incorrectly settle a larger topic-wide intent.
+    private func clearThroughIntent(newest: [Notification], fallback: [ClearRequest],
                                     predicate: NSPredicate) -> ClearThroughIntent? {
         guard clearThrough != nil, let boundary = fallback.first, ClearThroughCoordinator.valid(boundary),
               let time = newest.first?.time else { return nil }
         let request = NSFetchRequest<NSDictionary>(entityName: "Notification")
         request.resultType = .dictionaryResultType
-        request.propertiesToFetch = ["id", "sequenceID"]
-        request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [predicate, NSPredicate(format: "time == %@", NSNumber(value: time))])
+        request.propertiesToFetch = ["id", "sequenceID", "time"]
+        request.predicate = predicate
         request.fetchLimit = 1001
         guard let rows = try? context.fetch(request), rows.count <= 1000 else { return nil }
-        let candidates = rows.compactMap { row -> ClearRequest? in
+        var candidates: [ClearRequest] = []
+        let known = rows.compactMap { row -> ClearRequest? in
             guard let id = row["id"] as? String else { return nil }
-            return ClearRequest(baseUrl: boundary.baseUrl, topic: boundary.topic, sequence: row["sequenceID"] as? String ?? id,
-                                user: boundary.user, messageId: id)
+            let snapshot = ClearRequest(baseUrl: boundary.baseUrl, topic: boundary.topic, sequence: row["sequenceID"] as? String ?? id,
+                                        user: boundary.user, messageId: id)
+            if (row["time"] as? NSNumber)?.int64Value == time { candidates.append(snapshot) }
+            return snapshot
         }
-        guard !candidates.isEmpty else { return nil }
-        return ClearThroughIntent(boundary: boundary, candidates: candidates, known: fallback)
+        guard !candidates.isEmpty, known.count == rows.count else { return nil }
+        return ClearThroughIntent(boundary: boundary, candidates: candidates, known: known)
     }
 
     private func wakeAfterBulk(_ request: ClearRequest) {

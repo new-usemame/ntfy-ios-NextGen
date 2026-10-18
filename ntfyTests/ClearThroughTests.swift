@@ -223,4 +223,41 @@ final class ClearThroughTests: XCTestCase {
         wait(for: [finished], timeout: 2)
         XCTAssertEqual(sends, 1)
     }
+    func testTopicIntentOverTenRowsDoesNotReconcileFromOnlyTenClearControls() throws {
+        let store = Store.shared
+        let sub = store.saveSubscription(baseUrl: base, topic: "test-topic")
+        defer { store.delete(subscription: sub); store.clearThrough = nil }
+        store.credentialStore = InMemoryCredentialStore()
+        store.clearPublisher = { _, _ in XCTFail("bulk retry cannot fan out") }
+        store.topicNotificationRemover = { _, _, _, _ in }
+        let finished = expectation(description: "all read intent retained")
+        store.wakePublisher = { _, done in done(); finished.fulfill() }
+        let messages = (0..<12).map { index in
+            Message(id: String(format: "Read%08d", index), time: Int64(100 + index), event: "message", topic: "test-topic")
+        }
+        store.save(notificationsFromMessages: messages, withSubscription: sub)
+        var methods: [String] = []
+        coordinator = make { request, done in
+            methods.append(request.httpMethod ?? "GET")
+            if methods.count == 1 { done(nil, nil, URLError(.timedOut)) }
+            else if request.httpMethod != "PUT" {
+                // A previous action cleared the newest ten, while two older read rows remain.
+                // A capped reconciliation snapshot would falsely declare this topic fully clear.
+                let originals = messages.map { "{\"id\":\"\($0.id)\",\"time\":\($0.time),\"event\":\"message\",\"topic\":\"test-topic\"}\n" }.joined()
+                let controls = messages.suffix(10).enumerated().map { index, message in
+                    "{\"id\":\"Ctrl\(String(format: "%08d", index))\",\"time\":200,\"event\":\"message_clear\",\"topic\":\"test-topic\",\"sequence_id\":\"\(message.id)\"}\n"
+                }.joined()
+                done(Data((originals + controls).utf8), self.response(request, status: 200), nil)
+            } else {
+                XCTAssertEqual(methods, ["PUT", "GET", "PUT"])
+                done(self.receipt(messages.last!.id), self.response(request, status: 200), nil)
+            }
+        }
+        store.clearThrough = coordinator
+        store.setRead(true, forSubscription: sub)
+        XCTAssertEqual(store.unreadCount(baseUrl: base, topic: "test-topic"), 0)
+        wait(for: [finished], timeout: 2)
+        XCTAssertEqual(methods, ["PUT", "GET", "PUT"])
+    }
+
 }
