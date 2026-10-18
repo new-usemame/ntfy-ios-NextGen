@@ -183,6 +183,14 @@ struct ActionExecutor {
             return backoff
         }
         guard let http = response as? HTTPURLResponse, [429, 503].contains(http.statusCode) else { return nil }
+        if http.statusCode == 429, let directive = RetryDirective.parse(
+            condition: http.value(forHTTPHeaderField: "Retry-After-Condition"),
+            retryAfter: http.value(forHTTPHeaderField: "Retry-After")) {
+            switch directive {
+            case .time(let delay): return max(backoff, delay)
+            case .stateChange, .requestChange: return nil
+            }
+        }
         if let header = http.value(forHTTPHeaderField: "Retry-After"), let seconds = TimeInterval(header.trimmingCharacters(in: .whitespaces)) {
             return min(max(seconds, 0), maxRetryDelay)
         }

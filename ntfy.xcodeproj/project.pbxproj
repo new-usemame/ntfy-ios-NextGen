@@ -9,6 +9,8 @@
 /* Begin PBXBuildFile section */
 		118B00010000000000000004 /* TopicLinkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 118B00010000000000000003 /* TopicLinkTests.swift */; };
 		118B00010000000000000002 /* TopicLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 118B00010000000000000001 /* TopicLink.swift */; };
+		BA1180000000000000000002 /* ServerCapabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA1180000000000000000001; };
+		BA1180000000000000000003 /* ServerCapabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA1180000000000000000001; };
         A18000110000000000000003 /* Retention.swift in Sources */ = {isa = PBXBuildFile; fileRef = A18000110000000000000002 /* Retention.swift */; };
         A18000120000000000000001 /* RetentionSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A18000120000000000000002 /* RetentionSettingsView.swift */; };
         A18000110000000000000001 /* Retention.swift in Sources */ = {isa = PBXBuildFile; fileRef = A18000110000000000000002 /* Retention.swift */; };
@@ -140,6 +142,7 @@
 /* Begin PBXFileReference section */
 		118B00010000000000000003 /* TopicLinkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopicLinkTests.swift; sourceTree = "<group>"; };
 		118B00010000000000000001 /* TopicLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopicLink.swift; sourceTree = "<group>"; };
+		BA1180000000000000000001 /* ServerCapabilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerCapabilities.swift; sourceTree = "<group>"; };
         A18000130000000000000001 /* Model 7.xcdatamodel */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcdatamodel; path = "Model 7.xcdatamodel"; sourceTree = "<group>"; };
         A18000120000000000000002 /* RetentionSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RetentionSettingsView.swift; sourceTree = "<group>"; };
         A18000110000000000000002 /* Retention.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Retention.swift; sourceTree = "<group>"; };
@@ -409,6 +412,7 @@
 		9474F210283326E000CDE4DD /* Utils */ = {
 			isa = PBXGroup;
 			children = (
+				BA1180000000000000000001 /* ServerCapabilities.swift */,
 				9474F20E283326C500CDE4DD /* ApiService.swift */,
 				94CD1969283E666900973B93 /* EmojiManager.swift */,
 				9474F211283327C200CDE4DD /* Helpers.swift */,
@@ -644,6 +648,7 @@
 				9474F1C1282F2AA700CDE4DD /* AppMain.swift in Sources */,
 				118B00010000000000000002 /* TopicLink.swift in Sources */,
 				94867143283EC9960093C7A4 /* Actions.swift in Sources */,
+				BA1180000000000000000002 /* ServerCapabilities.swift in Sources */,
 				9474F20F283326C500CDE4DD /* ApiService.swift in Sources */,
 				94B736D7284AF9BE003D69FB /* MainView.swift in Sources */,
 				9474F1F72830830700CDE4DD /* ntfy.xcdatamodeld in Sources */,
@@ -675,6 +680,7 @@
 				9474F1E7282F3FFD00CDE4DD /* NotificationService.swift in Sources */,
 				94CD196B283E666900973B93 /* EmojiManager.swift in Sources */,
 				94867144283ECD370093C7A4 /* Actions.swift in Sources */,
+				BA1180000000000000000003 /* ServerCapabilities.swift in Sources */,
 				94867145284058C60093C7A4 /* ApiService.swift in Sources */,
 				2968F2AE2FBA530200480665 /* AttachmentProgressState.swift in Sources */,
 				9474F2052831D51500CDE4DD /* Store.swift in Sources */,

@@ -83,6 +83,27 @@ enum NotificationHealth {
 struct PollHTTPError: Error {
     let status: Int
     let retryAfter: String?
+    var retryCondition: String? = nil
+}
+
+/// Recognized server extensions never shorten a reset to the stock one-hour cap.
+/// Unknown/malformed conditions leave the 1.17 policy in charge.
+enum RetryDirective: Equatable {
+    case time(TimeInterval), stateChange, requestChange
+
+    static func parse(condition: String?, retryAfter: String?, now: Date = Date()) -> RetryDirective? {
+        switch condition?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "state-change": return .stateChange
+        case "request-change": return .requestChange
+        case "time":
+            guard let value = retryAfter?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty,
+                  value.allSatisfy({ $0.isASCII && $0.isNumber }), let seconds = Double(value), seconds.isFinite else { return nil }
+            // Dispatch nanosecond deadlines cannot represent arbitrarily large intervals. Do not
+            // retry such a refusal early; require an explicit new user intent instead.
+            return seconds < Double(Int64.max) / 1_000_000_000 ? .time(seconds) : .requestChange
+        default: return nil
+        }
+    }
 }
 
 enum PollFailure: Equatable {
@@ -177,13 +198,21 @@ final class ServerCooldown {
     private var until: [String: Double]
     private var probes: [String: Double]
     private var failures: [String: Int] = [:]
+    private let uptime: () -> TimeInterval
+    private var extended: [String: Double]
+    private var monotonic: [String: Double] = [:]
+    private var changes: [String: String]
+    private let extendedKey = "serverExtensionCooldowns118"
+    private let changeKey = "serverExtensionChanges118"
     // No request survives a launch; only the deadlines and manual-probe pacing need persistence.
     struct Attempt { fileprivate let generation: UUID? }
     private var generations: [String: UUID] = [:]
 
-    init(defaults: UserDefaults?, now: @escaping () -> Date = Date.init) {
+    init(defaults: UserDefaults?, now: @escaping () -> Date = Date.init,
+         uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
         self.defaults = defaults
         self.now = now
+        self.uptime = uptime
         let date = now().timeIntervalSince1970
         until = (defaults?.dictionary(forKey: key) as? [String: Double] ?? [:])
             .filter { $0.value.isFinite && $0.value > date }
@@ -191,14 +220,23 @@ final class ServerCooldown {
         probes = (defaults?.dictionary(forKey: probeKey) as? [String: Double] ?? [:])
             .filter { $0.value.isFinite && $0.value > date - 60 }
             .mapValues { min($0, date) }
-        generations = until.mapValues { _ in UUID() }
+        extended = (defaults?.dictionary(forKey: extendedKey) as? [String: Double] ?? [:])
+            .filter { $0.value.isFinite && $0.value > date && $0.value - date < Double(Int64.max) / 1_000_000_000 }
+        changes = (defaults?.dictionary(forKey: changeKey) as? [String: String] ?? [:])
+            .filter { ["state-change", "request-change"].contains($0.value) }
+        monotonic = extended.mapValues { uptime() + $0 - date }
+        generations = until.merging(extended) { max($0, $1) }.mapValues { _ in UUID() }
+        for server in changes.keys { generations[server] = UUID() }
         defaults?.set(until, forKey: key)
         defaults?.set(probes, forKey: probeKey)
     }
 
     func deadline(for server: String) -> Date {
         lock.lock(); defer { lock.unlock() }
-        return Date(timeIntervalSince1970: until[normalizeBaseUrl(server)] ?? 0)
+        let key = normalizeBaseUrl(server)
+        if changes[key] != nil { return .distantFuture }
+        let remaining = max(0, (monotonic[key] ?? 0) - uptime())
+        return max(Date(timeIntervalSince1970: until[key] ?? 0), now().addingTimeInterval(remaining))
     }
 
     func claim(server: String, manual: Bool) -> Bool {
@@ -209,7 +247,11 @@ final class ServerCooldown {
         lock.lock(); defer { lock.unlock() }
         let server = normalizeBaseUrl(server)
         let date = now().timeIntervalSince1970
-        if (until[server] ?? 0) > date {
+        let extensionWait = (monotonic[server] ?? 0) > uptime()
+        // Explicit user probes may test a changed state/request, paced as in 1.17. Automatic
+        // polling/clearing never resumes on a short timer for a non-time condition.
+        if extensionWait { return nil }
+        if changes[server] != nil || (until[server] ?? 0) > date {
             guard manual, date - (probes[server] ?? 0) >= 60 else { return nil }
             probes[server] = date
             defaults?.set(probes, forKey: probeKey)
@@ -217,11 +259,24 @@ final class ServerCooldown {
         return Attempt(generation: generations[server])
     }
 
-    func limit(server: String, retryAfter: String?) {
+    func limit(server: String, retryAfter: String?, condition: String? = nil) {
         lock.lock(); defer { lock.unlock() }
         let server = normalizeBaseUrl(server)
         let date = now()
         generations[server] = UUID() // A 429 invalidates older probes even if its deadline is unchanged.
+        if let directive = RetryDirective.parse(condition: condition, retryAfter: retryAfter, now: date) {
+            switch directive {
+            case .time(let seconds):
+                let delay = max(1, seconds)
+                monotonic[server] = max(monotonic[server] ?? 0, uptime() + delay)
+                extended[server] = max(extended[server] ?? 0, date.timeIntervalSince1970 + delay)
+            case .stateChange: changes[server] = "state-change"
+            case .requestChange: changes[server] = "request-change"
+            }
+            defaults?.set(extended, forKey: extendedKey)
+            defaults?.set(changes, forKey: changeKey)
+            return
+        }
         let active = (until[server] ?? 0) > date.timeIntervalSince1970
         // Concurrent failures in the same burst are one attempt, not successive retries.
         if !active { failures[server] = min((failures[server] ?? 0) + 1, 7) }
@@ -239,6 +294,11 @@ final class ServerCooldown {
         // Clear only the brake this fetch tested, never a newer concurrent 429 from a poll or clear.
         guard generations[server] == attempt.generation else { return }
         until.removeValue(forKey: server)
+        extended.removeValue(forKey: server)
+        monotonic.removeValue(forKey: server)
+        changes.removeValue(forKey: server)
+        defaults?.set(extended, forKey: extendedKey)
+        defaults?.set(changes, forKey: changeKey)
         failures.removeValue(forKey: server)
         generations.removeValue(forKey: server)
         defaults?.set(until, forKey: key)
