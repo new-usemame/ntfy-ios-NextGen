@@ -16,7 +16,7 @@ final class RelayCheckTests: XCTestCase {
         "{\"relayed\":\(stamp == nil ? "false" : "true"),\"relayed_at\":\(stamp.map(String.init) ?? "null"),\"window_seconds\":120}"
     }
     private func make(supported: Bool = true) -> RelayCheck {
-        RelayCheck(discover: { $0(supported) }, read: { request, completion in
+        RelayCheck(cooldown: nil, discover: { $0(supported) }, read: { request, completion in
             self.reads.append(request)
             let reply = self.replies.removeFirst()
             completion(Data(reply.1.utf8), HTTPURLResponse(url: request.url!, statusCode: reply.0,
@@ -52,7 +52,7 @@ final class RelayCheckTests: XCTestCase {
     }
     func testPlainHTTPRejectedBeforeDiscovery() {
         var discovered = false
-        let check = RelayCheck(discover: { _ in discovered = true })
+        let check = RelayCheck(cooldown: nil, discover: { _ in discovered = true })
         check.prepare(baseUrl: "http://private.example", topic: "topic")
         XCTAssertFalse(discovered)
         XCTAssertTrue(check.state.message!.contains("requires HTTPS"))
@@ -144,6 +144,25 @@ final class RelayCheckTests: XCTestCase {
         XCTAssertTrue(check.state.message!.contains("86400 seconds"))
         XCTAssertEqual(reads.count, 1)
     }
+    func testTimedCooldownSurvivesANewRelayViewAndSkipsAllHTTP() {
+        let cooldown = ServerCooldown(defaults: nil)
+        let first = RelayCheck(cooldown: cooldown, discover: { $0(true) }, read: { request, done in
+            done(Data(), HTTPURLResponse(url: request.url!, statusCode: 429, httpVersion: nil,
+                headerFields: ["Retry-After-Condition": "time", "Retry-After": "72000"]), nil)
+        })
+        prepare(first)
+        first.approve { _ in XCTFail("Rate-limited baseline must not publish") }
+        var discoveryCalls = 0
+        var httpCalls = 0
+        let second = RelayCheck(cooldown: cooldown, discover: { completion in
+            discoveryCalls += 1; completion(true)
+        }, read: { _, _ in httpCalls += 1 })
+        prepare(second)
+        second.approve { _ in XCTFail("New view must retain the shared cooldown") }
+        XCTAssertEqual(discoveryCalls, 0)
+        XCTAssertEqual(httpCalls, 0)
+        XCTAssertTrue(second.state.message!.contains("pausing requests"))
+    }
     func testUnsupportedEndpointStopsReads() {
         replies = [(404,"",[:])]
         let check = make(); prepare(check); approve(check)
@@ -167,7 +186,7 @@ final class RelayCheckTests: XCTestCase {
     }
     func testCancellationIgnoresLateDiscovery() {
         var callback: ((Bool) -> Void)?
-        let check = RelayCheck(discover: { callback = $0 })
+        let check = RelayCheck(cooldown: nil, discover: { callback = $0 })
         check.prepare(baseUrl: "https://private.example", topic: "topic")
         check.cancel(); callback?(true); drain()
         XCTAssertEqual(check.state, .cancelled)

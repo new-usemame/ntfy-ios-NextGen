@@ -47,6 +47,7 @@ final class RelayCheck: ObservableObject {
     private let read: Read
     private let schedule: Schedule
     private let relayBaseUrl: String
+    private let cooldown: ServerCooldown?
     private var generation = UUID()
     private var nextAllowed: TimeInterval = 0
     private var baseline: Int64?
@@ -54,10 +55,12 @@ final class RelayCheck: ObservableObject {
     private var session: URLSession?
 
     init(relayBaseUrl: String = Config.appBaseUrl,
+         cooldown: ServerCooldown? = .shared,
          discover: ((@escaping (Bool) -> Void) -> Void)? = nil,
          read: Read? = nil,
          schedule: @escaping Schedule = { delay, action in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action) }) {
         self.relayBaseUrl = relayBaseUrl
+        self.cooldown = cooldown
         self.discover = discover ?? { completion in
             ServerCapabilitiesCache.shared.discover(baseUrl: relayBaseUrl, user: nil) { completion($0.relayCheck) }
         }
@@ -92,6 +95,10 @@ final class RelayCheck: ObservableObject {
 
     func prepare(baseUrl: String, topic: String) {
         guard !state.isBusy, ProcessInfo.processInfo.systemUptime >= nextAllowed else { return }
+        if let cooldown, !cooldown.claim(server: relayBaseUrl, manual: false, kind: .relay) {
+            state = .failed("The relay is pausing requests after a rate limit. Wait for the requested delay or the relevant server or request change before trying again.")
+            return
+        }
         generation = UUID()
         baseline = nil
         guard Self.isSecureBase(baseUrl), Self.isSecureBase(relayBaseUrl), !topic.isEmpty else {
@@ -164,6 +171,11 @@ final class RelayCheck: ObservableObject {
     private func lookup(id: UUID, completion: @escaping (Snapshot) -> Void) {
         guard generation == id,
               let url = URL(string: relayBaseUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/v1/ntfyme/relay-check") else { return }
+        let attempt = cooldown?.claimAttempt(server: relayBaseUrl, manual: false, kind: .relay)
+        guard cooldown == nil || attempt != nil else {
+            state = .failed("The relay is pausing requests after a rate limit. Wait for the requested delay or the relevant server or request change before trying again.")
+            return
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -181,6 +193,9 @@ final class RelayCheck: ObservableObject {
                 return
             }
             if response.statusCode == 429 {
+                self.cooldown?.limit(server: self.relayBaseUrl,
+                    retryAfter: response.value(forHTTPHeaderField: "Retry-After"),
+                    condition: response.value(forHTTPHeaderField: "Retry-After-Condition"), kind: .relay)
                 let condition = response.value(forHTTPHeaderField: "Retry-After-Condition")
                 let seconds = response.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init)
                 let guidance: String
@@ -200,6 +215,7 @@ final class RelayCheck: ObservableObject {
                 self.state = .failed("The relay did not return a valid check result (HTTP \(response.statusCode)). This does not establish whether forwarding works.")
                 return
             }
+            if let attempt { self.cooldown?.succeeded(server: self.relayBaseUrl, attempt: attempt) }
             completion(snapshot)
         }
     }
