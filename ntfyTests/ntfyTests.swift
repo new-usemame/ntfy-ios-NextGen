@@ -7356,3 +7356,28 @@ final class SharedDeliveryBrakeTests: XCTestCase {
         XCTAssertEqual(cooldown.deadline(for: other.baseUrl), date.addingTimeInterval(600))
     }
 }
+
+final class DeliveryReceiptSignalTests: XCTestCase {
+    func testReceiptSignalClearsFailureAfterTheDatabaseChangeAlreadyArrived() {
+        let store = Store(inMemory: true)
+        let topic = store.saveSubscription(baseUrl: "https://receipt-signal.example.org", topic: "one")
+        let monitor = DeliveryHealthMonitor.shared
+        let key = topic.objectID.uriRepresentation().absoluteString
+        monitor.register(store.pollRequest(for: topic)!)
+        monitor.record(key: key, failure: .unreachable)
+        // The earlier Core Data broadcast has no receipt yet; the later signal must recover it.
+        monitor.refreshReceipts()
+        XCTAssertEqual(monitor.topics[key]?.failure, .unreachable)
+        let defaults = UserDefaults(suiteName: Store.appGroup)!
+        let previous = defaults.object(forKey: DeliveryReceipt.key)
+        defer { defaults.set(previous, forKey: DeliveryReceipt.key) }
+        defaults.set([topic.urlString(): Date().addingTimeInterval(1).timeIntervalSince1970], forKey: DeliveryReceipt.key)
+        defaults.synchronize()
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+            CFNotificationName("net.ntfy.deliveryHealthReceiptChanged" as CFString), nil, nil, true)
+        let recovered = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            monitor.topics[key] == nil
+        }, object: nil)
+        wait(for: [recovered], timeout: 2)
+    }
+}
