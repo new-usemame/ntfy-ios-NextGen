@@ -1384,6 +1384,29 @@ final class ntfyTests: XCTestCase {
         XCTAssertEqual(sent.last, "later", "sending resumes after Retry-After")
     }
 
+    /// A 429 (or a hostile Retry-After) from one server must not silence clears to another.
+    func testClearRateLimitOnOneServerDoesNotPauseAnother() throws {
+        let limited = instantSubscription(baseUrl: "https://limited.invalid", topic: "limited")
+        let other = instantSubscription(baseUrl: "https://other.invalid", topic: "other")
+        Store.shared.save(notificationsFromMessages: (0..<3).map { instantMessage("l\($0)", sequence: "l\($0)", topic: "limited", time: 1_000 + Int64($0)) }, withSubscription: limited)
+        let clock = installClearPacer()
+        var sent: [String] = []
+        Store.shared.clearPublisher = { request, done in
+            sent.append(request.sequence)
+            done(request.baseUrl.contains("limited") ? .rateLimited(retryAfter: 3600) : .sent)
+        }
+        Store.shared.wakePublisher = { _, done in done() }
+        Store.shared.setRead(true, forSubscription: limited)
+        XCTAssertEqual(sent, ["l2"], "the limited server's queue stops at its 429")
+        Store.shared.save(notificationsFromMessages: [instantMessage("o", sequence: "o0", topic: "other", time: 2_000)], withSubscription: other)
+        clock.now += 5
+        Store.shared.setRead(true, forSubscription: other)
+        XCTAssertEqual(sent.last, "o0", "another server's clears still go out")
+        Store.shared.save(notificationsFromMessages: [instantMessage("l9", sequence: "l9", topic: "limited", time: 3_000)], withSubscription: limited)
+        Store.shared.setRead(true, forSubscription: limited)
+        XCTAssertEqual(sent.last, "o0", "the limited server stays paused")
+    }
+
     func testClearActionReportsRateLimitWithRetryAfter() {
         let request = ClearRequest(baseUrl: "https://sequence.invalid", topic: "sequence-tests", sequence: "job", user: nil)
         for (status, headers, expected) in [(429, ["Retry-After": "42"], ClearOutcome.rateLimited(retryAfter: 42)),

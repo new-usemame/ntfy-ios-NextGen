@@ -394,7 +394,6 @@ struct AuthCheckResponse: Codable {
     }
 }
 
-/// Snapshot captured on the store queue. Safe to use after the row is changed or deleted.
 enum ClearOutcome: Equatable {
     case sent, failed, rateLimited(retryAfter: TimeInterval)
 }
@@ -403,7 +402,8 @@ enum ClearOutcome: Equatable {
 /// per 3 s) and its daily message quota with polls and publishes. Opening a topic with hundreds of
 /// unread messages used to fire one PUT per message at once; most came back 429 and locked the
 /// user's own polls out for minutes. Clears go out one at a time, spaced, and a 429 drops what is
-/// queued and pauses for the server's Retry-After. Clears are best effort: local state never waits.
+/// queued for that server and pauses it for its Retry-After; other servers keep going.
+/// Clears are best effort: local state never waits.
 final class ClearPacer {
     /// Newest distinct sequences cleared per read action; older ones are rarely still on screen elsewhere.
     static let perAction = 10
@@ -412,12 +412,15 @@ final class ClearPacer {
     typealias Publish = (ClearRequest, @escaping (ClearOutcome) -> Void) -> Void
     var schedule: (TimeInterval, @escaping () -> Void) -> Void = { DispatchQueue.main.asyncAfter(deadline: .now() + $0, execute: $1) }
     var now: () -> Date = Date.init
-    private struct Item { let request: ClearRequest; let publish: Publish; let done: (Bool) -> Void }
+    private struct Item {
+        let request: ClearRequest; let publish: Publish; let done: (Bool) -> Void
+        var server: String { normalizeBaseUrl(request.baseUrl) }
+    }
     private let lock = NSLock()
     private var pending: [Item] = []
     private var busy = false
     private var lastStart = Date.distantPast
-    private var pausedUntil = Date.distantPast
+    private var pausedUntil: [String: Date] = [:]
 
     func send(_ requests: [ClearRequest], via publish: @escaping Publish, done: @escaping (ClearRequest, Bool) -> Void) {
         lock.lock()
@@ -431,15 +434,11 @@ final class ClearPacer {
 
     private func pump() {
         lock.lock()
-        guard !busy, !pending.isEmpty else { lock.unlock(); return }
         let now = now()
-        if now < pausedUntil {
-            let dropped = pending
-            pending = []
-            lock.unlock()
-            dropped.forEach { $0.done(false) }
-            return
-        }
+        pausedUntil = pausedUntil.filter { $0.value > now }
+        let paused = pending.filter { pausedUntil[$0.server] != nil }
+        pending.removeAll { pausedUntil[$0.server] != nil }
+        guard !busy, !pending.isEmpty else { lock.unlock(); paused.forEach { $0.done(false) }; return }
         busy = true
         let wait = lastStart.addingTimeInterval(Self.spacing).timeIntervalSince(now)
         if wait > 0 {
@@ -450,14 +449,15 @@ final class ClearPacer {
         let item = pending.removeFirst()
         lastStart = now
         lock.unlock()
+        paused.forEach { $0.done(false) }
         item.publish(item.request) { [self] outcome in
             lock.lock()
             busy = false
             var dropped: [Item] = []
             if case .rateLimited(let retryAfter) = outcome {
-                pausedUntil = self.now().addingTimeInterval(min(max(retryAfter, 1), 3600))
-                dropped = pending
-                pending = []
+                pausedUntil[item.server] = self.now().addingTimeInterval(min(max(retryAfter, 1), 3600))
+                dropped = pending.filter { $0.server == item.server }
+                pending.removeAll { $0.server == item.server }
             }
             lock.unlock()
             item.done(outcome == .sent)
@@ -467,6 +467,7 @@ final class ClearPacer {
     }
 }
 
+/// Snapshot captured on the store queue. Safe to use after the row is changed or deleted.
 struct ClearRequest {
     let baseUrl: String
     let topic: String
