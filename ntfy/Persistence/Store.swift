@@ -828,6 +828,9 @@ class Store: ObservableObject {
                 newMessages = nil
             }
         }
+        // The NSE reconciliation caller uses this save too, including successful empty polls.
+        // Publish after saving, so another process never sees recovery before the content lands.
+        if newMessages != nil { DeliveryReceipt.record(topicUrl: request.topicUrl) }
         return newMessages
     }
 
@@ -1090,8 +1093,16 @@ class Store: ObservableObject {
         // Same main-queue contract as saveSubscription: the Add-subscription login path calls this from
         // a URLSession completion, so the fetch/insert/save must be hopped onto the context's queue.
         context.performAndWait {
+            let normalized = normalizeBaseUrl(baseUrl)
+            var previousPassword: String?
+            if password != nil {
+                switch credentialStore.readPassword(baseUrl: normalized) {
+                case .found(let previous): previousPassword = previous
+                case .notFound: break
+                case .failed: return // Cannot safely replace a credential we cannot restore.
+                }
+            }
             do {
-                let normalized = normalizeBaseUrl(baseUrl)
                 // Write before inserting or mutating a row. Failure leaves the editor's user intact
                 // and creates no orphan account that would silently poll without a password.
                 if let password, !credentialStore.setPassword(password, baseUrl: normalized) { return }
@@ -1108,6 +1119,9 @@ class Store: ObservableObject {
                 saved = true
             } catch let error {
                 Log.w(Store.tag, "Cannot store user", error)
+                if password != nil, !credentialStore.setPassword(previousPassword, baseUrl: normalized) {
+                    Log.w(Store.tag, "Cannot restore credential after account save failed")
+                }
                 rollbackAndRefresh()
             }
         }
