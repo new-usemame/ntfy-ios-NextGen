@@ -38,7 +38,9 @@ class ApiService {
                 return
             }
             guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
-                completionHandler(nil, URLError(.badServerResponse))
+                let http = response as? HTTPURLResponse
+                completionHandler(nil, PollHTTPError(status: http?.statusCode ?? 0,
+                    retryAfter: http?.value(forHTTPHeaderField: "Retry-After")))
                 return
             }
             guard let data = data else {
@@ -281,7 +283,9 @@ class ApiService {
                 return
             }
             guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
-                completionHandler(nil, URLError(.badServerResponse))
+                let http = response as? HTTPURLResponse
+                completionHandler(nil, PollHTTPError(status: http?.statusCode ?? 0,
+                    retryAfter: http?.value(forHTTPHeaderField: "Retry-After")))
                 return
             }
             guard let data = data else {

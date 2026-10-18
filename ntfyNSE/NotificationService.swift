@@ -84,8 +84,10 @@ class NotificationService: UNNotificationServiceExtension {
             return
         }
         if case .reconcile(let poll) = result {
+            let placeholder = NotificationHealth.fetchFailureContent(request.content, topic: received.topic, baseUrl: baseUrl)
+            bestAttemptContent = placeholder
             ApiService.shared.poll(poll, timeout: NotificationServiceTiming.pollTimeout) { messages, _ in
-                guard let messages else { self.deliver(self.fallbackContent(request)); return }
+                guard let messages else { self.deliver(placeholder); return }
                 let presentations = Store.shared.save(notificationsFromMessages: messages, polledWith: poll) ?? []
                 if let latest = presentations.last(where: { $0.sequence == received.sequence }) {
                     self.handlePresentation(request, content, baseUrl, latest, reconciled: true)
@@ -160,6 +162,9 @@ class NotificationService: UNNotificationServiceExtension {
             return
         }
         
+        // Install the safe topic-named fallback before starting the fetch, including expiry.
+        let placeholder = NotificationHealth.fetchFailureContent(request.content, topic: subscription.topic, baseUrl: subscription.baseUrl)
+        bestAttemptContent = placeholder
         // Poll original server
         let user = store?.getBasicUser(baseUrl: subscription.baseUrl)
         // The extension only needs contentHandler to be called from the async callback
@@ -172,7 +177,7 @@ class NotificationService: UNNotificationServiceExtension {
         ) { message, error in
             guard let message = message else {
                 Log.w(self.tag, "Error fetching poll request message topic=\(pollRequest.topic), pollId=\(pollId), subscription=\(topicUrl(baseUrl: subscription.baseUrl, topic: subscription.topic))", error)
-                self.deliver(self.fallbackContent(request))
+                self.deliver(placeholder)
                 return
             }
             self.handleMessage(request, content, subscription.baseUrl, message)

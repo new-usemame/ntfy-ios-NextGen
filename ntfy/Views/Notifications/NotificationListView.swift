@@ -83,7 +83,7 @@ struct NotificationListView: View {
     /// (see `PollGuard`); pull to refresh always polls.
     private func pollOnce(skipIfInFlight: Bool = false) async -> Bool {
         await withCheckedContinuation { continuation in
-            subscriptionManager.pollWithOutcome(subscription, skipIfInFlight: skipIfInFlight) { outcome in
+            subscriptionManager.pollWithOutcome(subscription, skipIfInFlight: skipIfInFlight, manual: !skipIfInFlight) { outcome in
                 continuation.resume(returning: outcome.succeeded)
             }
         }

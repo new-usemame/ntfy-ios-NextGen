@@ -6,6 +6,7 @@ struct SubscriptionManager {
     private let tag = "SubscriptionManager"
     var store: Store
     var reconciler: FcmSubscriptionReconciler = .shared
+    var polling: PollCoordinator = .shared
     /// The network call behind a poll; a seam so tests can answer without a server.
     var fetch: (PollRequest, @escaping ([Message]?, Error?) -> Void) -> Void = { ApiService.shared.poll($0, completionHandler: $1) }
 
@@ -33,21 +34,25 @@ struct SubscriptionManager {
         var succeeded = false
         for request in requests {
             group.enter()
-            let finish: (Bool) -> Void = { saved in
-                if saved { lock.lock(); succeeded = true; lock.unlock() }
+            guard polling.begin(request, manual: false, completion: { outcome in
+                if outcome.succeeded { lock.lock(); succeeded = true; lock.unlock() }
                 group.leave()
+            }) else { continue }
+            let finish: (Bool, Error?) -> Void = { saved, error in
+                polling.finish(request, outcome: PollOutcome(succeeded: saved, newMessages: [],
+                    failure: saved ? nil : PollFailure.classify(error)), retryAfter: (error as? PollHTTPError)?.retryAfter)
             }
-            fetch(request) { messages, _ in
+            fetch(request) { messages, error in
                 guard let messages, store.save(notificationsFromMessages: messages, polledWith: request) != nil else {
-                    finish(false)
+                    finish(false, error)
                     return
                 }
                 if request.since != nil, let ordered = store.reconciliationRequest(after: request) {
-                    fetch(ordered) { messages, _ in
-                        finish(messages.map { store.save(notificationsFromMessages: $0, polledWith: ordered) != nil } ?? false)
+                    fetch(ordered) { messages, error in
+                        finish(messages.map { store.save(notificationsFromMessages: $0, polledWith: ordered) != nil } ?? false, error)
                     }
                 } else {
-                    finish(true)
+                    finish(true, nil)
                 }
             }
         }
@@ -98,11 +103,11 @@ struct SubscriptionManager {
     }
     
     func poll(_ subscription: Subscription) {
-        poll(subscription) { (_: [Message]) in }
+        pollWithOutcome(subscription) { _ in }
     }
 
     func poll(_ subscription: Subscription, completionHandler: @escaping ([Message]) -> Void) {
-        pollWithOutcome(subscription) { outcome in completionHandler(outcome.newMessages) }
+        pollWithOutcome(subscription, presenting: true) { outcome in completionHandler(outcome.newMessages) }
     }
 
     /// The request is built from a snapshot taken on the store's context (URL, cursor, credentials,
@@ -110,13 +115,10 @@ struct SubscriptionManager {
     /// saved against the object ID, re-resolved on the context; if the topic was unsubscribed in the
     /// meantime the response is dropped.
     ///
-    /// `skipIfInFlight` is for the open topic's live loop only: while a live poll of the topic is
-    /// running, the next one is skipped (answered at once as a success with no new messages) rather
-    /// than piling up behind a slow server. Every other caller (background fetch, pull to refresh,
-    /// the topic list, subscribing) always runs its own poll, so a background wakeup is never
-    /// answered with "no data" just because a foreground poll was still out. Overlapping polls are
-    /// harmless: saves de-duplicate by id and the cursor never moves backward.
-    func pollWithOutcome(_ subscription: Subscription, skipIfInFlight: Bool = false, completionHandler: @escaping (PollOutcome) -> Void) {
+    /// The live loop skips an overlapping tick; explicit refresh joins an existing request and
+    /// waits for its result. All polls respect ordinary cooldowns unless manual, and every caller
+    /// respects server rate limits. Saves still de-duplicate by ID and never move cursors backward.
+    func pollWithOutcome(_ subscription: Subscription, skipIfInFlight: Bool = false, manual: Bool = false, presenting: Bool = false, completionHandler: @escaping (PollOutcome) -> Void) {
         guard let request = store.pollRequest(for: subscription) else {
             Log.d(tag, "Attempting to poll dead subscription failed")
             completionHandler(PollOutcome(succeeded: false, newMessages: []))
@@ -130,31 +132,67 @@ struct SubscriptionManager {
             }
         }
         let release = { if skipIfInFlight { PollGuard.shared.end(key: request.topicUrl) } }
+        guard polling.begin(request, manual: manual, presenting: presenting, completion: { outcome in
+            release()
+            completionHandler(outcome)
+        }) else { return }
         let store = self.store
         let tag = self.tag
         Log.d(tag, "Polling from \(request.topicUrl) with user \(request.user?.username ?? "anonymous")")
         fetch(request) { messages, error in
             guard let messages = messages else {
                 Log.e(tag, "Polling failed", error)
-                release()
-                completionHandler(PollOutcome(succeeded: false, newMessages: []))
+                polling.finish(request, outcome: PollOutcome(succeeded: false, newMessages: [], failure: PollFailure.classify(error)),
+                               retryAfter: (error as? PollHTTPError)?.retryAfter)
                 return
             }
             // Report only what was actually stored. The server can re-deliver messages we already
             // have; notifying for those re-alerts the user about a message they have already seen.
             let newMessages = store.save(notificationsFromMessages: messages, polledWith: request)
-            release()
             if let newMessages {
                 Log.d(tag, "Polling success, \(messages.count) message(s), \(newMessages.count) new", newMessages)
             }
-            completionHandler(PollOutcome(succeeded: newMessages != nil, newMessages: newMessages ?? []))
+            polling.finish(request, outcome: PollOutcome(succeeded: newMessages != nil, newMessages: newMessages ?? [],
+                           failure: newMessages == nil ? .other : nil), retryAfter: nil)
         }
     }
+
+    /// Completion includes saves and all outcomes, rather than only enqueueing the requests.
+    func pollAll(_ subscriptions: [Subscription], manual: Bool, completion: @escaping () -> Void) {
+        let launch = {
+            guard !subscriptions.isEmpty else { completion(); return }
+            var next = 0
+            var remaining = subscriptions.count
+            func startNext() {
+                guard next < subscriptions.count else { return }
+                let subscription = subscriptions[next]
+                next += 1
+                pollWithOutcome(subscription, manual: manual) { _ in
+                    DispatchQueue.main.async {
+                        remaining -= 1
+                        if remaining == 0 { completion() } else { startNext() }
+                    }
+                }
+            }
+            // A large list must not burst every topic at the server at once. A rate-limit
+            // response is recorded before the next queued topic reaches the shared gate.
+            for _ in 0..<min(4, subscriptions.count) { startNext() }
+        }
+        if Thread.isMainThread { launch() } else { DispatchQueue.main.async(execute: launch) }
+    }
+
+    func pollAll(_ subscriptions: [Subscription], manual: Bool) async {
+        await withCheckedContinuation { continuation in
+            pollAll(subscriptions, manual: manual) { continuation.resume() }
+        }
+    }
+
 }
 
 struct PollOutcome {
     let succeeded: Bool
     let newMessages: [Message]
+    var failure: PollFailure? = nil
 }
 
 /// At most one live-loop poll in flight per topic. Without it the open topic's ten-second timer
