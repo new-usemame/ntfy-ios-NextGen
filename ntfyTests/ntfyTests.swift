@@ -6,6 +6,7 @@ import Security
 @testable import ntfy
 
 private final class InMemoryCredentialStore: CredentialStoring {
+    var failWrites = false
     private var passwords: [String: String] = [:]
     private var headers: [String: [String: String]] = [:]
     private var deleteRequests: [String] = []
@@ -17,6 +18,7 @@ private final class InMemoryCredentialStore: CredentialStoring {
     func setPassword(_ password: String?, baseUrl: String) -> Bool {
         lock.lock()
         defer { lock.unlock() }
+        if failWrites { return false }
         guard let password, !password.isEmpty else {
             passwords.removeValue(forKey: baseUrl)
             return true
@@ -7383,5 +7385,73 @@ final class DeliveryReceiptSignalTests: XCTestCase {
             monitor.topics[key] == nil
         }, object: nil)
         wait(for: [recovered], timeout: 2)
+    }
+}
+
+final class HardeningPolicyTests: XCTestCase {
+    func testFailedCredentialWriteDoesNotCreateOrChangeAUser() {
+        let credentials = InMemoryCredentialStore()
+        let store = Store(inMemory: true, credentialStore: credentials)
+        credentials.failWrites = true
+        XCTAssertFalse(store.saveUser(baseUrl: "https://login.example.org", username: "reader", password: "fixture-password"))
+        XCTAssertNil(store.getUser(baseUrl: "https://login.example.org"))
+        credentials.failWrites = false
+        XCTAssertTrue(store.saveUser(baseUrl: "https://login.example.org", username: "reader", password: "first"))
+        credentials.failWrites = true
+        XCTAssertFalse(store.saveUser(baseUrl: "https://login.example.org", username: "changed", password: "second"))
+        XCTAssertEqual(store.getUser(baseUrl: "https://login.example.org")?.username, "reader")
+        XCTAssertEqual(credentials.password(baseUrl: "https://login.example.org"), "first")
+    }
+
+    func testFailedSaveKeepsEditorOpenAndDeleteNeedsConfirmation() {
+        var state = LoginEditorState()
+        XCTAssertFalse(state.save { false })
+        XCTAssertTrue(state.saveFailed)
+        XCTAssertTrue(state.save { true })
+        XCTAssertFalse(state.saveFailed)
+        var deletions = 0
+        state.finishDelete(confirmed: true) { deletions += 1 }
+        XCTAssertEqual(deletions, 0)
+        state.requestDelete()
+        XCTAssertTrue(state.confirmingDelete)
+        state.finishDelete(confirmed: false) { deletions += 1 }
+        XCTAssertEqual(deletions, 0)
+        state.requestDelete()
+        state.confirmingDelete = false // SwiftUI dismisses its alert binding before invoking the action.
+        state.finishDelete(confirmed: true) { deletions += 1 }
+        XCTAssertEqual(deletions, 1)
+    }
+
+    func testHTTPLoginNoticeAndReleaseLogging() {
+        XCTAssertEqual(UrlSecurityNotice.message(for: "http://lan.example.org"), "This server uses HTTP. Your password is sent without encryption.")
+        XCTAssertNil(UrlSecurityNotice.message(for: "https://lan.example.org"))
+        XCTAssertEqual(FirebaseLogPolicy.level(debug: false), .min)
+        XCTAssertEqual(FirebaseLogPolicy.level(debug: true), .max)
+    }
+
+    func testNoEmptyTagsForMissingOrEmptyTagField() {
+        var input: [AnyHashable: Any] = ["id": "id", "time": "1", "event": "message", "topic": "garden", "message": "hello"]
+        XCTAssertEqual(Message.from(userInfo: input)?.tags, [])
+        input["tags"] = ",one,,two,"
+        XCTAssertEqual(Message.from(userInfo: input)?.tags, ["one", "two"])
+    }
+
+    func testPrivacyManifestsAreBundledWithReasonsAndNoTracking() throws {
+        let app = Bundle.main.bundleURL.appendingPathComponent("PrivacyInfo.xcprivacy")
+        let nse = Bundle.main.bundleURL.appendingPathComponent("PlugIns/ntfyNSE.appex/PrivacyInfo.xcprivacy")
+        for url in [app, nse] {
+            let data = try Data(contentsOf: url)
+            let manifest = try XCTUnwrap(PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
+            XCTAssertEqual(manifest["NSPrivacyTracking"] as? Bool, false)
+            let reasons = try XCTUnwrap(manifest["NSPrivacyAccessedAPITypes"] as? [[String: Any]])
+            let defaults = try XCTUnwrap(reasons.first { $0["NSPrivacyAccessedAPIType"] as? String == "NSPrivacyAccessedAPICategoryUserDefaults" })
+            XCTAssertEqual(Set(defaults["NSPrivacyAccessedAPITypeReasons"] as? [String] ?? []), Set(["CA92.1", "1C8F.1"]))
+            XCTAssertTrue(reasons.contains { $0["NSPrivacyAccessedAPIType"] as? String == "NSPrivacyAccessedAPICategoryFileTimestamp" })
+            if url == app {
+                XCTAssertEqual(reasons.count, 4)
+                let collected = try XCTUnwrap(manifest["NSPrivacyCollectedDataTypes"] as? [[String: Any]])
+                XCTAssertTrue(collected.contains { $0["NSPrivacyCollectedDataType"] as? String == "NSPrivacyCollectedDataTypeDeviceID" })
+            } else { XCTAssertEqual(reasons.count, 2) }
+        }
     }
 }
