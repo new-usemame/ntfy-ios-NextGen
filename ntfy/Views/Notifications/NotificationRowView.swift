@@ -109,6 +109,7 @@ struct NotificationRowView: View {
                             .foregroundColor(.gray)
                         if [1,2,4,5].contains(notification.priority) {
                             Image("priority-\(notification.priority)")
+                                .accessibilityLabel(notification.priority == 5 ? "Urgent priority" : notification.priority == 4 ? "High priority" : notification.priority == 2 ? "Low priority" : "Minimum priority")
                                 .resizable()
                                 .scaledToFit()
                                 .frame(width: 16, height: 16)
@@ -252,6 +253,7 @@ struct NotificationRowView: View {
                 .padding(.vertical, 4)
         }
         .menuStyle(.borderlessButton)
+        .accessibilityLabel("Message options")
     }
     
     private func copyMessage() {

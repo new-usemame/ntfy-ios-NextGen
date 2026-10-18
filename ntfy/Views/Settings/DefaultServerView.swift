@@ -55,6 +55,7 @@ struct DefaultServerView: View {
                                     newDefaultBaseUrl = ""
                                 } label: {
                                     Image(systemName: "clear.fill")
+                                        .accessibilityLabel("Clear default server")
                                 }
                             }
                         }

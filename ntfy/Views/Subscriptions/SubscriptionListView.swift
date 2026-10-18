@@ -42,6 +42,7 @@ struct SubscriptionListView: View {
                                 Task { await pollSubscriptions(manual: true) }
                             } label: {
                                 Image(systemName: "arrow.clockwise")
+                                    .accessibilityLabel("Refresh subscriptions")
                             }
                         }
                     }
@@ -90,6 +91,7 @@ struct SubscriptionListView: View {
                     self.showingAddDialog = true
                 } label: {
                     Image(systemName: "plus")
+                        .accessibilityLabel("Add subscription")
                 }
             }
         }

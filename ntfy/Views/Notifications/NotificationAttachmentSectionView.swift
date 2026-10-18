@@ -264,6 +264,7 @@ struct NotificationAttachmentSectionView: View {
                 .background(.ultraThinMaterial, in: Circle())
         }
         .menuStyle(.borderlessButton)
+        .accessibilityLabel("Attachment options")
         .fixedSize()
     }
 

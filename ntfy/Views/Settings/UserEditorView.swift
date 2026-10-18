@@ -91,6 +91,7 @@ struct UserEditorView: View {
                         } label: {
                             Image(systemName: "ellipsis.circle")
                                 .padding([.leading], 40)
+                                .accessibilityLabel("User options")
                         }
                     }
                 }

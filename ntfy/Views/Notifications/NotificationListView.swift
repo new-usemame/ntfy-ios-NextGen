@@ -156,6 +156,7 @@ struct NotificationListView: View {
                     } label: {
                         Image(systemName: "ellipsis.circle")
                             .padding([.leading], 40)
+                            .accessibilityLabel("Topic options")
                     }
                 }
             }
