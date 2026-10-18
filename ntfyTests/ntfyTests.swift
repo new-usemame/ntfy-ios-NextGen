@@ -1407,6 +1407,57 @@ final class ntfyTests: XCTestCase {
         XCTAssertEqual(sent.last, "o0", "the limited server stays paused")
     }
 
+    /// A pacer whose spacing waits are held until the test runs them.
+    private func heldPacer() -> (ClearPacer, PacerClock, () -> Void) {
+        let clock = PacerClock()
+        let pacer = ClearPacer()
+        var held: [() -> Void] = []
+        pacer.now = { clock.now }
+        pacer.schedule = { delay, work in clock.delays.append(delay); held.append { clock.now += delay; work() } }
+        return (pacer, clock, { let next = held.removeFirst(); next() })
+    }
+
+    func testClearPacerReleasesItemsDroppedForAPausedServerWhileWaitingOnSpacing() {
+        let (pacer, _, _) = heldPacer()
+        let limited = ClearRequest(baseUrl: "https://limited.invalid", topic: "t", sequence: "a1", user: nil)
+        pacer.send([limited], via: { _, done in done(.rateLimited(retryAfter: 60)) }) { _, _ in }
+        var results: [String: Bool] = [:]
+        let other = ClearRequest(baseUrl: "https://other.invalid", topic: "t", sequence: "b1", user: nil)
+        let again = ClearRequest(baseUrl: "https://limited.invalid", topic: "t", sequence: "a2", user: nil)
+        pacer.send([again, other], via: { _, done in done(.sent) }) { request, sent in results[request.sequence] = sent }
+        XCTAssertEqual(results["a2"], false, "a paused server's clear is released, not left hanging behind the spacing wait")
+        XCTAssertNil(results["b1"], "the other server's clear is still waiting its turn")
+    }
+
+    func testClearPacerPutsANotificationResponseClearAheadOfTheBacklog() {
+        let (pacer, _, runNext) = heldPacer()
+        var sent: [String] = []
+        let publish: ClearPacer.Publish = { request, done in sent.append(request.sequence); done(.sent) }
+        let backlog = (0..<8).map { ClearRequest(baseUrl: "https://selfhost.invalid", topic: "t", sequence: "s\($0)", user: nil) }
+        pacer.send(backlog, via: publish) { _, _ in }
+        XCTAssertEqual(sent, ["s0"])
+        let tapped = ClearRequest(baseUrl: "https://selfhost.invalid", topic: "t", sequence: "tapped", user: nil)
+        pacer.send([tapped], via: publish, first: true) { _, _ in }
+        runNext()
+        XCTAssertEqual(sent, ["s0", "tapped"], "the tapped banner's clear goes next, not after the backlog")
+        runNext()
+        XCTAssertEqual(sent.last, "s1")
+    }
+
+    func testClearPacerOverflowKeepsAClearPutFirst() {
+        let (pacer, _, _) = heldPacer()
+        var dropped: [String] = []
+        let hold: ClearPacer.Publish = { _, _ in } // first request stays in flight; the rest queue
+        let backlog = (0..<ClearPacer.maxPending + 1).map { ClearRequest(baseUrl: "https://selfhost.invalid", topic: "t", sequence: "s\($0)", user: nil) }
+        let record: (ClearRequest, Bool) -> Void = { request, sent in if !sent { dropped.append(request.sequence) } }
+        pacer.send(backlog, via: hold, done: record)
+        XCTAssertEqual(dropped, ["s0"], "one over the cap: the oldest queued item goes")
+        for name in ["tapped", "tapped2"] {
+            pacer.send([ClearRequest(baseUrl: "https://selfhost.invalid", topic: "t", sequence: name, user: nil)], via: hold, first: true, done: record)
+        }
+        XCTAssertEqual(dropped, ["s0", "s2"], "clears put first are never what makes room; the oldest backlog item is")
+    }
+
     func testClearActionReportsRateLimitWithRetryAfter() {
         let request = ClearRequest(baseUrl: "https://sequence.invalid", topic: "sequence-tests", sequence: "job", user: nil)
         for (status, headers, expected) in [(429, ["Retry-After": "42"], ClearOutcome.rateLimited(retryAfter: 42)),

@@ -413,7 +413,7 @@ final class ClearPacer {
     var schedule: (TimeInterval, @escaping () -> Void) -> Void = { DispatchQueue.main.asyncAfter(deadline: .now() + $0, execute: $1) }
     var now: () -> Date = Date.init
     private struct Item {
-        let request: ClearRequest; let publish: Publish; let done: (Bool) -> Void
+        let request: ClearRequest; let publish: Publish; let first: Bool; let done: (Bool) -> Void
         var server: String { normalizeBaseUrl(request.baseUrl) }
     }
     private let lock = NSLock()
@@ -422,11 +422,18 @@ final class ClearPacer {
     private var lastStart = Date.distantPast
     private var pausedUntil: [String: Date] = [:]
 
-    func send(_ requests: [ClearRequest], via publish: @escaping Publish, done: @escaping (ClearRequest, Bool) -> Void) {
+    /// `first` puts these ahead of the backlog: a notification response holds iOS's completion
+    /// handler until its clear is sent, so it can't wait behind a topic's worth of clears.
+    func send(_ requests: [ClearRequest], via publish: @escaping Publish, first: Bool = false,
+              done: @escaping (ClearRequest, Bool) -> Void) {
         lock.lock()
-        pending += requests.map { request in Item(request: request, publish: publish) { done(request, $0) } }
-        let overflow = pending.count > Self.maxPending ? Array(pending.prefix(pending.count - Self.maxPending)) : []
-        pending.removeFirst(overflow.count)
+        let items = requests.map { request in Item(request: request, publish: publish, first: first) { done(request, $0) } }
+        if first { pending.insert(contentsOf: items, at: 0) } else { pending += items }
+        var overflow: [Item] = []
+        var index = 0
+        while pending.count > Self.maxPending, index < pending.count {
+            if pending[index].first { index += 1 } else { overflow.append(pending.remove(at: index)) }
+        }
         lock.unlock()
         overflow.forEach { $0.done(false) }
         pump()
@@ -443,6 +450,7 @@ final class ClearPacer {
         let wait = lastStart.addingTimeInterval(Self.spacing).timeIntervalSince(now)
         if wait > 0 {
             lock.unlock()
+            paused.forEach { $0.done(false) }
             schedule(wait) { [self] in lock.lock(); busy = false; lock.unlock(); pump() }
             return
         }

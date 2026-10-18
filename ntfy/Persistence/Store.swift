@@ -554,7 +554,7 @@ class Store: ObservableObject {
             unread.forEach { $0.read = true }
             do {
                 try context.save()
-                sendActions(requests, completion: completion)
+                sendActions(requests, first: true, completion: completion)
             } catch {
                 rollbackAndRefresh()
                 completion()
@@ -590,7 +590,7 @@ class Store: ObservableObject {
     /// One read action may clear many sequences (newest first). Every banner goes locally; only the
     /// newest `ClearPacer.perAction` go to the server, paced. Finish those requests first, then
     /// wake each successful self-hosted topic once. Incoming ingestion never calls this.
-    private func sendActions(_ requests: [ClearRequest], completion: (() -> Void)? = nil) {
+    private func sendActions(_ requests: [ClearRequest], first: Bool = false, completion: (() -> Void)? = nil) {
         guard !requests.isEmpty else { completion?(); return }
         let wake = wakePublisher
         let lock = NSLock()
@@ -603,7 +603,7 @@ class Store: ObservableObject {
         }
         let capped = Array(unique.prefix(ClearPacer.perAction))
         capped.forEach { _ in group.enter() }
-        clearPacer.send(capped, via: clearPublisher) { request, succeeded in
+        clearPacer.send(capped, via: clearPublisher, first: first) { request, succeeded in
             if succeeded && normalizeBaseUrl(request.baseUrl) != normalizeBaseUrl(Config.appBaseUrl) {
                 lock.lock()
                 topics.insert(firebaseTopic(baseUrl: request.baseUrl, topic: request.topic))
