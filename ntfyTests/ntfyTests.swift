@@ -7195,7 +7195,7 @@ final class DeliveryHealthPresentationTests: XCTestCase {
         manager.poll(topic) { presentationCounts.append($0.count) }
         manager.poll(topic) { presentationCounts.append($0.count) }
         XCTAssertEqual(replies.count, 1)
-        replies[0]([Message(id: "health-message", time: 600, event: "message", topic: "one", message: "hello", title: nil)], nil)
+        replies[0]([Message(id: "health-message", time: Int64(Date().timeIntervalSince1970), event: "message", topic: "one", message: "hello", title: nil)], nil)
         XCTAssertEqual(liveCount, 1, "the UI still receives the complete result")
         XCTAssertEqual(presentationCounts, [1, 0], "joining a request must not create repeat alerts")
     }

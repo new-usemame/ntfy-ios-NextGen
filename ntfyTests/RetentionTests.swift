@@ -1,6 +1,7 @@
 import XCTest
 import CoreData
 import Combine
+import UserNotifications
 @testable import ntfy
 
 final class RetentionTests: XCTestCase {
@@ -720,6 +721,171 @@ final class RetentionTests: XCTestCase {
         XCTAssertEqual(model.notifications.first?.id, "new-during-read")
         XCTAssertEqual(model.notifications.first?.read, false)
         XCTAssertLessThanOrEqual(app.context.registeredObjects.filter { $0.entity.name == "Notification" && !$0.isFault }.count, 65)
+    }
+
+
+    func testPruneKeepsPollCursorAndJoinedRefreshDoesNotReviveExpiredHistory() throws {
+        let isolated = Store(inMemory: true)
+        isolated.saveNotificationRetention(.forever)
+        let sub = isolated.saveSubscription(baseUrl: "https://retention.example", topic: "join-after-prune")
+        let now = Date()
+        let old = Message(id: "pruned-cursor", time: Int64(now.timeIntervalSince1970) - 180 * 86_400,
+                          event: "message", topic: sub.topic!, message: "expired")
+        isolated.save(notificationFromMessage: old, withSubscription: sub)
+        let row = try XCTUnwrap(try isolated.context.fetch(ntfy.Notification.fetchRequest()).first { $0.id == old.id })
+        row.storedAt = now.addingTimeInterval(-7200)
+        let states = try isolated.context.fetch(NSFetchRequest<NSManagedObject>(entityName: "SequenceState"))
+        states.forEach { $0.setValue(now.addingTimeInterval(-7200), forKey: "storedAt") }
+        let pref = try XCTUnwrap(isolated.context.fetch(Preference.fetchRequest()).first { $0.key == Store.retentionPreferenceKey })
+        pref.value = String(NotificationRetention.day.rawValue)
+        try isolated.context.save()
+        let cursorTime = sub.lastEventTime
+        let original = try XCTUnwrap(isolated.pollRequest(for: sub))
+        XCTAssertEqual(original.since, old.id)
+        var clears = 0, wakes = 0
+        isolated.clearPublisher = { _, done in clears += 1; done(.sent) }
+        isolated.wakePublisher = { _, done in wakes += 1; done() }
+        let coordinator = PollCoordinator(defaults: nil, now: { now })
+        var manager = SubscriptionManager(store: isolated, polling: coordinator)
+        var fetches = 0
+        var reply: (([Message]?, Error?) -> Void)?
+        manager.fetch = { request, done in
+            fetches += 1; XCTAssertEqual(request.since, old.id); reply = done
+        }
+        var outcomes: [PollOutcome] = []
+        manager.pollWithOutcome(sub, automaticList: true, presenting: true) { outcomes.append($0) }
+        let pruned = expectation(description: "prune while joined request is in flight")
+        isolated.pruneNotifications(now: now) { result in
+            XCTAssertEqual(try? result.get(), 1); pruned.fulfill()
+        }
+        wait(for: [pruned], timeout: 10)
+        XCTAssertEqual(isolated.pollRequest(for: sub)?.since, old.id, "expiry must not reset since to all")
+        XCTAssertEqual(sub.lastEventTime, cursorTime)
+        XCTAssertNil(isolated.reconciliationRequest(after: original))
+        XCTAssertEqual(try isolated.context.count(for: NSFetchRequest<NSManagedObject>(entityName: "SequenceState")), 0)
+        manager.pollWithOutcome(sub, presenting: true) { outcomes.append($0) }
+        XCTAssertEqual(fetches, 1, "a prune must not discard PollCoordinator's in-flight join")
+        let fresh = Message(id: "fresh-after-prune", time: Int64(now.timeIntervalSince1970),
+                            event: "message", topic: sub.topic!, message: "new")
+        try XCTUnwrap(reply)([old, fresh], nil)
+        XCTAssertEqual(outcomes.count, 2)
+        XCTAssertTrue(outcomes.allSatisfy(\.succeeded))
+        XCTAssertEqual(outcomes.flatMap(\.newMessages).map(\.id), [fresh.id], "joined presenters get one fresh alert only")
+        XCTAssertEqual(isolated.totalUnreadCount(), 1)
+        XCTAssertNil(try isolated.context.fetch(ntfy.Notification.fetchRequest()).first { $0.id == old.id })
+        XCTAssertEqual(isolated.pollRequest(for: sub)?.since, fresh.id)
+        XCTAssertTrue(DeliveryHealthMonitor.shared.healthy(keys: [sub.objectID.uriRepresentation().absoluteString]))
+        var skipped = false
+        manager.pollWithOutcome(sub, automaticList: true) { skipped = !$0.attempted }
+        XCTAssertTrue(skipped, "retention must not reset the automatic list minimum interval")
+        XCTAssertEqual(fetches, 1)
+        XCTAssertEqual(clears, 0, "local expiry must not invoke ClearPacer")
+        XCTAssertEqual(wakes, 0)
+    }
+
+    func testPruneInvalidatesTopicSummariesAndBadgeWithoutChangingPushStatus() throws {
+        let sub = try fixture(60)
+        let now = Date()
+        let rows = try store.context.fetch(ntfy.Notification.fetchRequest()).filter { $0.subscription == sub }
+        for (index, row) in rows.enumerated() {
+            row.time = Int64(now.timeIntervalSince1970) - (index < 55 ? 3 * 86_400 : 3600)
+            row.read = false; row.storedAt = now.addingTimeInterval(-7200)
+        }
+        sub.fcmSubscribed = false
+        try store.context.save()
+        let baseline = store.totalUnreadCount() - 60
+        let topics = SubscriptionsObservable()
+        XCTAssertEqual(topics.summaries[sub.objectID]?.unread, 60) // warm the actual row-summary cache
+        let page = NotificationsObservable(subscriptionID: sub.objectID)
+        let pref = try XCTUnwrap(store.context.fetch(Preference.fetchRequest()).first { $0.key == Store.retentionPreferenceKey })
+        pref.value = String(NotificationRetention.day.rawValue)
+        try store.context.save()
+        defer { store.saveNotificationRetention(.forever) }
+        let key = sub.objectID.uriRepresentation().absoluteString
+        DeliveryHealthMonitor.shared.record(key: key, failure: .unauthorized)
+        let pageMerged = expectation(description: "prune reaches the published page")
+        let summaryMerged = expectation(description: "prune invalidates warmed topic summaries")
+        var sawPage = false, sawSummary = false
+        let pageChanges = page.$notifications.sink { rows in
+            if rows.count == 5 && !sawPage { sawPage = true; pageMerged.fulfill() }
+        }
+        let summaryChanges = topics.objectWillChange.sink {
+            if topics.summaries[sub.objectID]?.unread == 5 && !sawSummary {
+                sawSummary = true; summaryMerged.fulfill()
+            }
+        }
+        defer { pageChanges.cancel(); summaryChanges.cancel() }
+        let done = expectation(description: "prune summary and page merge")
+        store.pruneNotifications(now: now) { result in
+            XCTAssertEqual(try? result.get(), 55); done.fulfill()
+        }
+        wait(for: [done, pageMerged, summaryMerged], timeout: 10)
+        store.context.processPendingChanges()
+        XCTAssertEqual(topics.summaries[sub.objectID]?.total, 5)
+        XCTAssertEqual(topics.summaries[sub.objectID]?.unread, 5)
+        XCTAssertEqual(store.totalUnreadCount(), baseline + 5)
+        XCTAssertEqual(page.notifications.count, 5)
+        XCTAssertTrue(topics.subscriptions.contains { $0.objectID == sub.objectID && !$0.fcmSubscribed },
+                      "Notification status must still count this topic as waiting for push")
+        XCTAssertEqual(DeliveryHealthMonitor.shared.topics[key]?.failure, .unauthorized,
+                       "expiry is not evidence that a failed delivery recovered")
+        let content = UNMutableNotificationContent()
+        content.modify(message: Message(id: "badge-probe", time: Int64(now.timeIntervalSince1970),
+                                       event: "message", topic: sub.topic!, message: "probe"), baseUrl: sub.baseUrl!)
+        XCTAssertEqual(content.badge?.intValue, baseline + 5, "the NSE content path must use the post-prune unread total")
+    }
+
+
+    func testExtensionSaveAndSameSecondReconciliationAfterPruneKeepTheOpenPageCurrent() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var disks: [Store] = []
+        defer { closeDiskStores(disks); try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("nse-prune.sqlite")
+        let app = Store(inMemory: true, storeURL: url); disks.append(app)
+        app.saveNotificationRetention(.forever)
+        let sub = app.saveSubscription(baseUrl: "https://retention.example", topic: "nse-after-prune")
+        let now = Date()
+        let old = Message(id: "old-job", time: Int64(now.timeIntervalSince1970) - 3 * 86_400,
+                          event: "message", topic: sub.topic!, message: "old", sequenceID: "job")
+        app.save(notificationFromMessage: old, withSubscription: sub)
+        let row = try XCTUnwrap(app.context.fetch(ntfy.Notification.fetchRequest()).first)
+        row.storedAt = now.addingTimeInterval(-7200)
+        let pref = try XCTUnwrap(app.context.fetch(Preference.fetchRequest()).first { $0.key == Store.retentionPreferenceKey })
+        pref.value = String(NotificationRetention.day.rawValue)
+        try app.context.save()
+        let writer = Store(inMemory: true, storeURL: url); disks.append(writer)
+        writer.context.transactionAuthor = "ntfy.appex"
+        writer.allowsKeyDerivation = false // same restriction as the NSE
+        let model = NotificationsObservable(subscriptionID: sub.objectID, context: app.context)
+        let pruned = expectation(description: "old sequence row pruned")
+        app.pruneNotifications(now: now) { result in XCTAssertEqual(try? result.get(), 1); pruned.fulfill() }
+        wait(for: [pruned], timeout: 10)
+        app.context.processPendingChanges()
+        XCTAssertTrue(model.notifications.isEmpty)
+        let fetches = model.fetchCount
+        var clears = 0
+        writer.clearPublisher = { _, done in clears += 1; done(.sent) }
+        let fresh = Message(id: "new-job", time: Int64(now.timeIntervalSince1970),
+                            event: "message", topic: sub.topic!, message: "new", sequenceID: "job")
+        guard case .stored = writer.ingest(pushedMessage: fresh, baseUrl: sub.baseUrl!, topic: sub.topic!) else {
+            return XCTFail("the NSE save path must accept the new version after local expiry")
+        }
+        let control = Message(id: "clear-job", time: fresh.time, event: "message_clear", topic: sub.topic!, sequenceID: "job")
+        guard case .reconcile(let request) = writer.ingest(pushedMessage: control, baseUrl: sub.baseUrl!, topic: sub.topic!) else {
+            return XCTFail("an ambiguous same-second control must retain the NSE reconciliation path")
+        }
+        XCTAssertNil(request.since)
+        XCTAssertEqual(writer.save(notificationsFromMessages: [fresh, control], polledWith: request)?.count, 0)
+        let merged = expectation(description: "NSE save and reconciliation merged")
+        app.mergeRemoteHistory { merged.fulfill() }
+        wait(for: [merged], timeout: 10)
+        XCTAssertEqual(model.notifications.map(\.id), [fresh.id])
+        XCTAssertTrue(try XCTUnwrap(model.notifications.first).read)
+        XCTAssertEqual(model.fetchCount, fetches, "merged NSE writes must not refetch the page")
+        XCTAssertEqual(app.totalUnreadCount(), 0)
+        XCTAssertEqual(app.pollRequest(for: sub)?.since, control.id)
+        XCTAssertEqual(clears, 0, "remote reconcile controls never echo a server clear")
     }
 
 }
