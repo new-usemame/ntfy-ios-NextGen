@@ -23,6 +23,7 @@ final class ClearThroughCoordinator {
         let created: TimeInterval
         var boundary: ClearRequest
         var retries = 0
+        var reportedDeferred = false
         var completion: ((ClearThroughResult) -> Void)?
         init(_ intent: ClearThroughIntent, now: TimeInterval, completion: @escaping (ClearThroughResult) -> Void) {
             self.intent = intent; self.boundary = intent.boundary; self.created = now; self.completion = completion
@@ -54,9 +55,9 @@ final class ClearThroughCoordinator {
             self.prune()
             self.cooldown.requestChanged(server: intent.boundary.baseUrl, kind: .clearThrough)
             let work = Work(intent, now: self.now(), completion: completion)
-            if let old = self.pending.removeValue(forKey: work.key) { old.completion?(.deferred) }
+            if let old = self.pending.removeValue(forKey: work.key) { self.reportDeferred(old) }
             while self.pending.count >= Self.maxPending, let oldest = self.pending.min(by: { $0.value.created < $1.value.created })?.key {
-                self.pending.removeValue(forKey: oldest)?.completion?(.deferred)
+                if let old = self.pending.removeValue(forKey: oldest) { self.reportDeferred(old) }
             }
             self.pending[work.key] = work
             guard Self.valid(work.boundary), intent.candidates.count <= 1000 else { self.finish(work, .fallback); return }
@@ -183,7 +184,7 @@ final class ClearThroughCoordinator {
     }
     private func prune() {
         let stale = pending.filter { now() - $0.value.created > Self.retention }
-        stale.forEach { pending.removeValue(forKey: $0.key); $0.value.completion?(.deferred) }
+        stale.forEach { pending.removeValue(forKey: $0.key); reportDeferred($0.value) }
     }
     private func finish(_ work: Work, _ result: ClearThroughResult) {
         pending.removeValue(forKey: work.key)
@@ -193,7 +194,13 @@ final class ClearThroughCoordinator {
     private func deferWork(_ work: Work, failure: PollFailure) {
         Foundation.NotificationCenter.default.post(name: Self.didFail, object: nil,
             userInfo: ["baseUrl": work.boundary.baseUrl, "topic": work.boundary.topic, "failure": failure])
-        let callback = work.completion; work.completion = nil
-        callback?(.deferred)
+        // Keep the eventual success callback: a later ordinary poll may prove the transaction
+        // committed, and self-hosted devices still need their one upstream wake after that proof.
+        reportDeferred(work)
+    }
+    private func reportDeferred(_ work: Work) {
+        guard !work.reportedDeferred else { return }
+        work.reportedDeferred = true
+        work.completion?(.deferred)
     }
 }

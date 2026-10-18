@@ -192,6 +192,37 @@ final class ClearThroughTests: XCTestCase {
         wait(for: [finished], timeout: 2)
     }
 
+    func testLatePollReconciliationRetainsSuccessCallbackAndReportsItOnlyOnce() {
+        let deferred = expectation(description: "uncertain response deferred")
+        let reconciled = expectation(description: "later poll proves success")
+        let duplicate = expectation(description: "no duplicate success or deferred callback")
+        duplicate.isInverted = true
+        var sends = 0; var successes = 0; var deferrals = 0
+        coordinator = make { _, done in
+            sends += 1
+            done(nil, nil, URLError(.timedOut))
+        }
+        let controls = [Message(id: "ClrAbC123456", time: 101, event: "message_clear", topic: "test-topic", sequenceID: "opaque-sequence")]
+        coordinator.send(intent()) { result in
+            switch result {
+            case .deferred:
+                deferrals += 1
+                if deferrals == 1 { deferred.fulfill() } else { duplicate.fulfill() }
+                self.coordinator.reconcile(baseUrl: self.base, topic: "test-topic", messages: controls)
+                self.coordinator.reconcile(baseUrl: self.base, topic: "test-topic", messages: controls)
+            case .sent:
+                successes += 1
+                if successes == 1 { reconciled.fulfill() } else { duplicate.fulfill() }
+            case .fallback: XCTFail("lost-response intent must not fan out")
+            }
+        }
+        wait(for: [deferred, reconciled], timeout: 2)
+        wait(for: [duplicate], timeout: 0.1)
+        XCTAssertEqual(sends, 2)
+        XCTAssertEqual(successes, 1)
+        XCTAssertEqual(deferrals, 1)
+    }
+
     func testTopicReadCommitsLocallyWhileDiscoveryWaitsAndUsesOneBulkRequest() throws {
         let store = Store.shared
         let sub = store.saveSubscription(baseUrl: base, topic: "test-topic")
