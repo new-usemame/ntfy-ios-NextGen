@@ -7078,7 +7078,7 @@ final class DeliveryHealthHTTPTests: XCTestCase {
         let store = Store(inMemory: true)
         let topic = store.saveSubscription(baseUrl: "https://http.example.org", topic: "one")
         let request = try XCTUnwrap(store.pollRequest(for: topic))
-        let service = Service()
+        let service = Service(credentialStore: InMemoryCredentialStore())
         for status in [401, 403, 429, 500] {
             service.status = status
             service.poll(request) { messages, error in
@@ -7151,5 +7151,20 @@ final class DeliveryHealthPresentationTests: XCTestCase {
         replies[0]([Message(id: "health-message", time: 600, event: "message", topic: "one", message: "hello", title: nil)], nil)
         XCTAssertEqual(liveCount, 1, "the UI still receives the complete result")
         XCTAssertEqual(presentationCounts, [1, 0], "joining a request must not create repeat alerts")
+    }
+}
+
+final class DeliveryHealthRepairResultTests: XCTestCase {
+    func testRepairDoesNotClaimSetupIsCompleteWithoutPermissionAndRegistration() {
+        XCTAssertEqual(NotificationHealth.repairResult(permission: .denied, registered: true, bindingsComplete: true),
+                       "Notifications are turned off for this app.")
+        XCTAssertEqual(NotificationHealth.repairResult(permission: .notDetermined, registered: true, bindingsComplete: true),
+                       "Allow notifications to receive alerts.")
+        XCTAssertEqual(NotificationHealth.repairResult(permission: .authorized, registered: false, bindingsComplete: true),
+                       "Push registration is not ready. Check your connection and try again.")
+        XCTAssertEqual(NotificationHealth.repairResult(permission: .authorized, registered: true, bindingsComplete: false),
+                       "Push setup is still incomplete. Try again later.")
+        XCTAssertEqual(NotificationHealth.repairResult(permission: .provisional, registered: true, bindingsComplete: true),
+                       "Push setup is complete. This does not check delivery from your server.")
     }
 }
