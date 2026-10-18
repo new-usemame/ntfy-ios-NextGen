@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		118B00010000000000000004 /* TopicLinkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 118B00010000000000000003 /* TopicLinkTests.swift */; };
 		118B00010000000000000002 /* TopicLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 118B00010000000000000001 /* TopicLink.swift */; };
+		BA1180000000000000000012 /* ServerContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA1180000000000000000011; };
 		BA1180000000000000000002 /* ServerCapabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA1180000000000000000001; };
 		BA1180000000000000000003 /* ServerCapabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA1180000000000000000001; };
         A18000110000000000000003 /* Retention.swift in Sources */ = {isa = PBXBuildFile; fileRef = A18000110000000000000002 /* Retention.swift */; };
@@ -142,6 +143,7 @@
 /* Begin PBXFileReference section */
 		118B00010000000000000003 /* TopicLinkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopicLinkTests.swift; sourceTree = "<group>"; };
 		118B00010000000000000001 /* TopicLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopicLink.swift; sourceTree = "<group>"; };
+		BA1180000000000000000011 /* ServerContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerContractTests.swift; sourceTree = "<group>"; };
 		BA1180000000000000000001 /* ServerCapabilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerCapabilities.swift; sourceTree = "<group>"; };
         A18000130000000000000001 /* Model 7.xcdatamodel */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcdatamodel; path = "Model 7.xcdatamodel"; sourceTree = "<group>"; };
         A18000120000000000000002 /* RetentionSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RetentionSettingsView.swift; sourceTree = "<group>"; };
@@ -457,7 +459,8 @@
 			isa = PBXGroup;
 			children = (
 				FFB072E4CE7885C446A0546C /* ntfyTests.swift */,
-                A18000010000000000000002 /* RetentionTests.swift */,
+                BA1180000000000000000011 /* ServerContractTests.swift */,
+				A18000010000000000000002 /* RetentionTests.swift */,
 				2E1C0A052FF0000100A52946 /* LicensesTests.swift */,
 				2E1C0B042FF0000100A52946 /* NotificationResponseRelayTests.swift */,
 				118B00010000000000000003 /* TopicLinkTests.swift */,
@@ -702,7 +705,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				9B84D8DCA80BE0722286AFD4 /* ntfyTests.swift in Sources */,
-                A18000010000000000000001 /* RetentionTests.swift in Sources */,
+                BA1180000000000000000012 /* ServerContractTests.swift in Sources */,
+				A18000010000000000000001 /* RetentionTests.swift in Sources */,
 				2E1C0A062FF0000100A52946 /* LicensesTests.swift in Sources */,
 				2E1C0B052FF0000100A52946 /* NotificationResponseRelayTests.swift in Sources */,
 				118B00010000000000000004 /* TopicLinkTests.swift in Sources */,
