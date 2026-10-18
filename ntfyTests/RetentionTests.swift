@@ -131,6 +131,117 @@ final class RetentionTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: path.path))
     }
 
+    func testSubscriptionOnlyUpgradeAdoptsAndPersistsForever() throws {
+        let isolated = Store(inMemory: true)
+        _ = isolated.saveSubscription(baseUrl: "https://retention.example", topic: "cleared-before-upgrade")
+        XCTAssertEqual(try isolated.context.count(for: ntfy.Notification.fetchRequest()), 0)
+        XCTAssertEqual(try isolated.context.count(for: Preference.fetchRequest()), 0)
+        XCTAssertEqual(isolated.notificationRetention(), .forever)
+        isolated.retentionContext.performAndWait { isolated.retentionContext.reset() }
+        isolated.context.reset()
+        let request = Preference.fetchRequest()
+        request.predicate = NSPredicate(format: "key == %@", Store.retentionPreferenceKey)
+        XCTAssertEqual(try isolated.context.fetch(request).first?.value, "0", "the upgrade choice must persist even with no history")
+    }
+
+    func testEmptyModel6UpgradeAdoptsForeverAndPersistsAcrossReopening() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var stores: [Store] = []
+        defer { closeDiskStores(stores); try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("empty-model6.sqlite")
+        try autoreleasepool {
+            let modelURL = try XCTUnwrap(Bundle.main.url(forResource: "ntfy", withExtension: "momd"))
+                .appendingPathComponent("Model 6.mom")
+            let model = try XCTUnwrap(NSManagedObjectModel(contentsOf: modelURL))
+            let coordinator = NSPersistentStoreCoordinator(managedObjectModel: model)
+            let disk = try coordinator.addPersistentStore(ofType: NSSQLiteStoreType, configurationName: nil, at: url)
+            try coordinator.remove(disk)
+        }
+        let migrated = Store(inMemory: true, storeURL: url)
+        stores.append(migrated)
+        XCTAssertEqual(migrated.notificationRetention(), .forever, "an empty legacy database is still an upgrade")
+        let reopened = Store(inMemory: true, storeURL: url)
+        stores.append(reopened)
+        XCTAssertEqual(reopened.notificationRetention(), .forever)
+        let request = Preference.fetchRequest()
+        request.predicate = NSPredicate(format: "key == %@", Store.retentionPreferenceKey)
+        XCTAssertEqual(try reopened.context.fetch(request).first?.value, "0")
+    }
+
+    func testForeverSavedBetweenCandidateFetchAndCommitCancelsThatBatch() throws {
+        let isolated = Store(inMemory: true)
+        XCTAssertTrue(isolated.saveNotificationRetention(.day))
+        isolated.retentionContext.performAndWait {} // finish the empty automatic prune
+        let sub = isolated.saveSubscription(baseUrl: "https://retention.example", topic: "change-policy")
+        let row = ntfy.Notification(context: isolated.context)
+        row.id = "keep-after-forever"; row.message = "history"; row.time = 1; row.subscription = sub
+        row.presented = true
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try Data("attachment".utf8).write(to: path)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1)], ofItemAtPath: path.path)
+        defer { try? FileManager.default.removeItem(at: path) }
+        row.attachmentLocalPath = path.path
+        try isolated.context.save()
+        let switched = expectation(description: "Forever saved after candidates fetched")
+        isolated.retentionCandidatesFetched = {
+            isolated.retentionCandidatesFetched = nil
+            DispatchQueue.main.sync {
+                XCTAssertTrue(isolated.saveNotificationRetention(.forever))
+                switched.fulfill()
+            }
+        }
+        let done = expectation(description: "stale deletion batch rejected")
+        isolated.pruneNotifications { result in
+            XCTAssertEqual(try? result.get(), 0)
+            done.fulfill()
+        }
+        wait(for: [switched, done], timeout: 5)
+        XCTAssertEqual(isolated.notificationRetention(), .forever)
+        XCTAssertEqual(try isolated.context.count(for: ntfy.Notification.fetchRequest()), 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path.path))
+        XCTAssertEqual(try isolated.context.count(for: NSFetchRequest<NSManagedObject>(entityName: "PendingAttachmentDeletion")), 0)
+        XCTAssertEqual(isolated.presentedDeliveries().count, 1)
+    }
+
+    func testPollIngestionDoesNotWaitForThePruneQueue() throws {
+        let isolated = Store(inMemory: true)
+        XCTAssertTrue(isolated.saveNotificationRetention(.month))
+        isolated.retentionContext.performAndWait {}
+        let sub = isolated.saveSubscription(baseUrl: "https://retention.example", topic: "busy-prune")
+        let request = try XCTUnwrap(isolated.pollRequest(for: sub))
+        let held = expectation(description: "prune queue occupied")
+        let release = DispatchSemaphore(value: 0)
+        let ingested = DispatchSemaphore(value: 0)
+        isolated.retentionContext.perform {
+            held.fulfill()
+            _ = release.wait(timeout: .now() + 5)
+        }
+        wait(for: [held], timeout: 2)
+        // A blocked old getter is released after one second so the red cannot hang the runner.
+        DispatchQueue.global().async {
+            _ = ingested.wait(timeout: .now() + 1)
+            release.signal()
+        }
+        let message = Message(id: "while-pruning", time: Int64(Date().timeIntervalSince1970), event: "message", topic: "busy-prune", message: "fresh")
+        let start = CFAbsoluteTimeGetCurrent()
+        let saved = isolated.save(notificationsFromMessages: [message], polledWith: request)
+        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        ingested.signal()
+        XCTAssertEqual(saved?.map(\.id), [message.id])
+        XCTAssertLessThan(elapsed, 0.5, "ingestion must finish while the retention queue is still held")
+        isolated.retentionContext.performAndWait {}
+    }
+
+    func testGlobalPruneIndexesStartWithTime() throws {
+        for (entity, name) in [("Notification", "notificationRetention"), ("SequenceState", "sequenceRetention")] {
+            let description = try XCTUnwrap(store.container.managedObjectModel.entitiesByName[entity])
+            let index = try XCTUnwrap(description.indexes.first { $0.name == name })
+            XCTAssertEqual(index.elements.map { $0.property?.name }, ["time", "storedAt"])
+            XCTAssertTrue(index.elements.allSatisfy { $0.isAscending })
+        }
+    }
+
     func testRetentionAdoptionPreservesExistingUsersAndUsesAndroidDefaultForFreshStore() throws {
         let fresh = Store(inMemory: true)
         XCTAssertEqual(fresh.notificationRetention(), .month)

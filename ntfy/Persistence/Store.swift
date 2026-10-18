@@ -57,6 +57,12 @@ class Store: ObservableObject {
     private static let sharedDefaultsKeyCriticalAlertsAuthorized = "criticalAlertsAuthorized"
     let container: NSPersistentContainer
     let retentionContext: NSManagedObjectContext
+    let retentionReadContext: NSManagedObjectContext
+    let hadPersistentStore: Bool
+    let retentionPolicyLock = NSLock()
+    var retentionPolicyGeneration: UInt64 = 0 // guarded by retentionPolicyLock
+    /// Observes the candidate/save boundary; nil outside deterministic concurrency tests.
+    var retentionCandidatesFetched: (() -> Void)?
     private let historyContext: NSManagedObjectContext
     private var historyToken: NSPersistentHistoryToken?
     /// Injected so credential and migration behavior can be tested without pretending an unsigned
@@ -153,6 +159,9 @@ class Store: ObservableObject {
                 withIntermediateDirectories: true
             )
         }
+        // A database present before opening is prior-use evidence, even if all rows were cleared
+        // or another process has already migrated its model. /dev/null is the test memory store.
+        hadPersistentStore = storeUrl.path != "/dev/null" && fileManager.fileExists(atPath: storeUrl.path)
         let description = NSPersistentStoreDescription(url: storeUrl)
         description.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
         description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
@@ -174,6 +183,10 @@ class Store: ObservableObject {
         retentionContext = container.newBackgroundContext()
         retentionContext.transactionAuthor = "ntfy.retention"
         retentionContext.stalenessInterval = 0
+        // Policy lookup must not queue behind a whole-history prune or a chunked topic delete.
+        retentionReadContext = container.newBackgroundContext()
+        retentionReadContext.transactionAuthor = "ntfy.retention-policy"
+
         historyContext = container.newBackgroundContext()
         historyToken = container.persistentStoreCoordinator.currentPersistentHistoryToken(fromStores: nil)
 
@@ -183,8 +196,9 @@ class Store: ObservableObject {
         if Thread.isMainThread { _ = context }
         else { DispatchQueue.main.async { _ = self.context } }
         if !inMemory {
+            // Persist adoption in whichever process opens first, including an NSE-first upgrade.
+            _ = notificationRetention()
             if Bundle.main.bundlePath.hasSuffix(".appex") { trimPersistentHistory() }
-            else { _ = notificationRetention() }
         }
     }
 

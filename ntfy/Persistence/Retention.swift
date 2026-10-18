@@ -1,7 +1,7 @@
 import CoreData
 import Foundation
 import UserNotifications
-import SwiftUI
+import Combine
 
 /// Values match ntfy Android's global auto-delete options. Expiry uses message time.
 enum NotificationRetention: Int64, CaseIterable {
@@ -39,12 +39,13 @@ enum NotificationHistoryStrings {
 extension Store {
     static let retentionPreferenceKey = "notificationRetentionDays"
 
-    /// Adopt existing history without silently deleting it on upgrade. A fresh store uses Android's
+    /// Adopt prior use without silently deleting history on upgrade. A fresh store uses Android's
     /// 30-day default. Persist the decision, so clearing a topic never changes the chosen policy.
     func notificationRetention() -> NotificationRetention {
         var result = NotificationRetention.forever
-        retentionContext.performAndWait {
-            do { result = try resolveRetention(in: retentionContext) }
+        retentionReadContext.performAndWait {
+            retentionReadContext.reset()
+            do { result = try resolveRetention(in: retentionReadContext) }
             catch { Log.w(Store.tag, "Cannot read notification retention", error) }
         }
         return result
@@ -54,6 +55,8 @@ extension Store {
     func saveNotificationRetention(_ policy: NotificationRetention) -> Bool {
         var saved = false
         context.performAndWait {
+            retentionPolicyLock.lock()
+            defer { retentionPolicyLock.unlock() }
             do {
                 let request = Preference.fetchRequest()
                 request.predicate = NSPredicate(format: "key == %@", Self.retentionPreferenceKey)
@@ -61,6 +64,7 @@ extension Store {
                 pref.key = Self.retentionPreferenceKey
                 pref.value = String(policy.rawValue)
                 try context.save()
+                retentionPolicyGeneration &+= 1
                 saved = true
             } catch { Log.w(Store.tag, "Cannot save notification retention", error); context.rollback() }
         }
@@ -75,14 +79,37 @@ extension Store {
             // Unknown future values fail safe instead of deleting someone's history.
             return Int64(pref.value ?? "").flatMap(NotificationRetention.init(rawValue:)) ?? .forever
         }
-        let rows = Notification.fetchRequest()
-        rows.fetchLimit = 1
-        let policy: NotificationRetention = try context.count(for: rows) > 0 ? .forever : .month
+        var existing = hadPersistentStore
+        for entity in ["Subscription", "Notification", "User", "Preference", "SequenceState"] where !existing {
+            let rows = NSFetchRequest<NSFetchRequestResult>(entityName: entity)
+            rows.fetchLimit = 1
+            existing = try context.count(for: rows) > 0
+        }
+        let policy: NotificationRetention = existing ? .forever : .month
         let pref = Preference(context: context)
         pref.key = Self.retentionPreferenceKey
         pref.value = String(policy.rawValue)
         try context.save()
         return policy
+    }
+
+    private func retentionGeneration() -> UInt64 {
+        retentionPolicyLock.lock()
+        defer { retentionPolicyLock.unlock() }
+        return retentionPolicyGeneration
+    }
+
+    /// Linearize a local setting write against the actual deletion commit, not just its fetch.
+    /// A changed policy discards the entire pending transaction, including attachment/evidence work.
+    private func saveRetentionBatch(ifGeneration generation: UInt64) throws -> Bool {
+        retentionPolicyLock.lock()
+        defer { retentionPolicyLock.unlock() }
+        guard retentionPolicyGeneration == generation else {
+            retentionContext.reset()
+            return false
+        }
+        try retentionContext.save()
+        return true
     }
 
     /// All fetch/delete/unlink work runs on a private queue. Each save is at most 200 rows.
@@ -98,12 +125,14 @@ extension Store {
                 request.fetchBatchSize = 200
                 var count = 0
                 while true {
+                    let generation = self.retentionGeneration()
                     let policy = try self.resolveRetention(in: self.retentionContext)
                     guard policy != .forever else { break }
                     request.predicate = NSPredicate(format: "time < %lld AND (storedAt == nil OR storedAt < %@)",
                         Int64(now.timeIntervalSince1970) - policy.seconds, now.addingTimeInterval(-3600) as NSDate)
                     let rows = try self.retentionContext.fetch(request)
                     guard !rows.isEmpty else { break }
+                    self.retentionCandidatesFetched?()
                     let paths = Set(rows.compactMap(\.attachmentLocalPath).filter { !$0.isEmpty })
                     let pending = NSFetchRequest<NSManagedObject>(entityName: "PendingAttachmentDeletion")
                     pending.predicate = NSPredicate(format: "path IN %@", Array(paths))
@@ -119,7 +148,7 @@ extension Store {
                     }
                     try self.archivePresentedDeliveries(rows, in: self.retentionContext)
                     rows.forEach(self.retentionContext.delete)
-                    try self.retentionContext.save()
+                    guard try self.saveRetentionBatch(ifGeneration: generation) else { continue }
                     // One system query per chunk, rather than one per expired message.
                     if !banners.isEmpty {
                         let center = UNUserNotificationCenter.current()
@@ -135,19 +164,19 @@ extension Store {
                 }
                 // Sequence deduplication tombstones also need a bound. Keep at least 120 days,
                 // matching Android's hard-delete window, so delayed controls cannot revive history.
-                let policy = try self.resolveRetention(in: self.retentionContext)
-                if policy != .forever {
-                    let states = NSFetchRequest<NSManagedObject>(entityName: "SequenceState")
-                    states.fetchLimit = 200
+                let states = NSFetchRequest<NSManagedObject>(entityName: "SequenceState")
+                states.fetchLimit = 200
+                while true {
+                    let generation = self.retentionGeneration()
+                    let policy = try self.resolveRetention(in: self.retentionContext)
+                    guard policy != .forever else { break }
                     states.predicate = NSPredicate(format: "time < %lld AND (storedAt == nil OR storedAt < %@)",
                         Int64(now.timeIntervalSince1970) - max(policy.seconds, 120 * 86_400), now.addingTimeInterval(-3600) as NSDate)
-                    while true {
-                        let rows = try self.retentionContext.fetch(states)
-                        guard !rows.isEmpty else { break }
-                        rows.forEach(self.retentionContext.delete)
-                        try self.retentionContext.save()
-                        self.retentionContext.reset()
-                    }
+                    let rows = try self.retentionContext.fetch(states)
+                    guard !rows.isEmpty else { break }
+                    rows.forEach(self.retentionContext.delete)
+                    guard try self.saveRetentionBatch(ifGeneration: generation) else { continue }
+                    self.retentionContext.reset()
                 }
                 try self.removeExpiredAttachmentFiles(now: now)
                 // History is only used by live processes; new processes start at the current token.

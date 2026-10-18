@@ -7491,9 +7491,9 @@ final class HardeningPolicyTests: XCTestCase {
             let reasons = try XCTUnwrap(manifest["NSPrivacyAccessedAPITypes"] as? [[String: Any]])
             // Exact declarations for the linked Firebase 9.6.0, GDT 9.1.4 and GUL 7.7.1 sources.
             let expectedReasons = [
-                "NSPrivacyAccessedAPICategoryUserDefaults": Set(["CA92.1", "1C8F.1"])
+                "NSPrivacyAccessedAPICategoryUserDefaults": Set(["CA92.1", "1C8F.1"]),
+                "NSPrivacyAccessedAPICategoryFileTimestamp": Set(["C617.1"])
             ].merging(url == app ? [
-                "NSPrivacyAccessedAPICategoryFileTimestamp": Set(["C617.1"]),
                 "NSPrivacyAccessedAPICategoryDiskSpace": Set(["E174.1"])
             ] : [:]) { $1 }
             let actualReasons = Dictionary(uniqueKeysWithValues: reasons.map {

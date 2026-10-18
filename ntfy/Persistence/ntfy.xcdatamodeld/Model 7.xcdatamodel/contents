@@ -32,6 +32,10 @@
             <fetchIndexElement property="time" type="Binary" order="descending"/>
             <fetchIndexElement property="id" type="Binary" order="descending"/>
         </fetchIndex>
+        <fetchIndex name="notificationRetention">
+            <fetchIndexElement property="time" type="Binary" order="ascending"/>
+            <fetchIndexElement property="storedAt" type="Binary" order="ascending"/>
+        </fetchIndex>
         <uniquenessConstraints>
             <uniquenessConstraint>
                 <constraint value="id"/>
@@ -50,6 +54,10 @@
         <attribute name="time" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
         <attribute name="seenIDs" optional="YES" attributeType="String"/>
         <relationship name="subscription" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="Subscription" inverseName="sequenceStates" inverseEntity="Subscription"/>
+        <fetchIndex name="sequenceRetention">
+            <fetchIndexElement property="time" type="Binary" order="ascending"/>
+            <fetchIndexElement property="storedAt" type="Binary" order="ascending"/>
+        </fetchIndex>
         <uniquenessConstraints><uniquenessConstraint><constraint value="key"/></uniquenessConstraint></uniquenessConstraints>
     </entity>
     <entity name="PendingAttachmentDeletion" representedClassName="NSManagedObject" syncable="YES">
