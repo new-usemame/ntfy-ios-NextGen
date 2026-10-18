@@ -116,6 +116,7 @@ struct NotificationStatusView: View {
 
 /// Consent is local to a selected topic. The relay API never sees this message or its credentials.
 struct RelayTopicCheckView: View {
+    @Environment(\.scenePhase) private var scenePhase
     let subscription: Subscription
     @StateObject private var check = RelayCheck()
 
@@ -125,6 +126,7 @@ struct RelayTopicCheckView: View {
             prepare: { check.prepare(baseUrl: subscription.baseUrl ?? "", topic: subscription.topic ?? "") },
             approve: sendTest, cancel: check.cancel)
             .onDisappear { check.cancel() }
+            .onChange(of: scenePhase) { if $0 != .active { check.cancel() } }
     }
 
     private func sendTest() {

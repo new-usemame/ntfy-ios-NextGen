@@ -18,7 +18,7 @@ final class RelayCheck: ObservableObject {
             case .discovering: return "Checking whether the relay supports this test…"
             case .consent: return "The relay supports a wake-up check. Sending the test needs your approval."
             case .checking: return "Waiting for a newer forwarded wake-up…"
-            case .unsupported: return "This relay does not offer an automatic check. On your server, check upstream-base-url: https://ntfy-me.com, its canonical base-url, and outbound HTTPS. No test message was sent."
+            case .unsupported: return "This relay does not offer an automatic check. On your server, check upstream-base-url: https://ntfy-me.com, its canonical base-url, and outbound HTTPS. No automatic result is available."
             case .cancelled: return "Check cancelled. A test message already sent may still arrive."
             case .received(let milliseconds):
                 let date = Date(timeIntervalSince1970: Double(milliseconds) / 1000)
