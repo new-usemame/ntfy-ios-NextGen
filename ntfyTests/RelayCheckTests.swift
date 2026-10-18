@@ -1,5 +1,7 @@
 import XCTest
 import CryptoKit
+import SwiftUI
+import UIKit
 @testable import ntfy
 
 final class RelayCheckTests: XCTestCase {
@@ -172,4 +174,57 @@ final class RelayCheckTests: XCTestCase {
         XCTAssertTrue(message.contains("Network or FCM trouble"))
         XCTAssertFalse(message.contains("in 2 minutes"))
     }
+
+    /// Opt-in native UIKit/SwiftUI rendering evidence. These are presentation fixtures, separate
+    /// from the native-server integration, and never claim a live delivery outcome.
+    func testCaptureRelayResultStatesOnSimulator() throws {
+        guard ProcessInfo.processInfo.environment["RELAY_SCREENSHOTS"] == "1" else {
+            throw XCTSkip("Opt in with RELAY_SCREENSHOTS=1 for native visual evidence")
+        }
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: { $0.isKeyWindow })
+        let window = UIWindow(windowScene: scene)
+        window.frame = UIScreen.main.bounds
+        let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("relay-screenshots")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let states: [(String, RelayCheck.State)] = [
+            ("idle", .idle), ("discovering", .discovering), ("consent", .consent),
+            ("checking", .checking), ("unsupported", .unsupported), ("cancelled", .cancelled),
+            ("received", .received(stamp)), ("not-observed", .notObserved),
+            ("network-error", .failed("The relay could not be reached. This check cannot tell whether wake-ups are forwarding. Try again when the connection is available.")),
+            ("rate-limited", .failed("The relay rate limited this check. Wait at least 86400 seconds before trying again. No automatic retry will be sent."))
+        ]
+        defer { window.isHidden = true; previous?.makeKey() }
+        func scrollViews(_ view: UIView) -> [UIScrollView] {
+            (view as? UIScrollView).map { [$0] } ?? view.subviews.flatMap(scrollViews)
+        }
+        for (name, state) in states {
+            for variant in ["light", "dark", "largest-text"] {
+                let root = NavigationView {
+                    RelayCheckContentView(topicName: "Private alerts", baseUrl: "https://self-host.example/ntfy",
+                        state: state, prepare: {}, approve: {}, cancel: {})
+                }.navigationViewStyle(StackNavigationViewStyle())
+                    .environment(\.colorScheme, variant == "dark" ? .dark : .light)
+                    .environment(\.sizeCategory, variant == "largest-text" ? .accessibilityExtraExtraExtraLarge : .large)
+                let host = UIHostingController(rootView: root)
+                window.rootViewController = host
+                window.overrideUserInterfaceStyle = variant == "dark" ? .dark : .light
+                window.makeKeyAndVisible()
+                host.view.layoutIfNeeded()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.35))
+                let scroll = scrollViews(host.view).first
+                let offsets: [CGFloat] = variant == "largest-text" ? [0, max(0, (scroll?.contentSize.height ?? 0) - (scroll?.bounds.height ?? 0))] : [0]
+                for (page, offset) in offsets.enumerated() {
+                    scroll?.setContentOffset(CGPoint(x: 0, y: offset), animated: false)
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+                    let renderer = UIGraphicsImageRenderer(bounds: window.bounds)
+                    let image = renderer.image { _ in window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) }
+                    let data = try XCTUnwrap(image.jpegData(compressionQuality: 0.6))
+                    try data.write(to: directory.appendingPathComponent("\(name)-\(variant)-\(page).jpg"))
+                }
+            }
+        }
+        print("Relay visual evidence: \(directory.path)")
+    }
+
 }

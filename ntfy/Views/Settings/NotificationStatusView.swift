@@ -120,43 +120,11 @@ struct RelayTopicCheckView: View {
     @StateObject private var check = RelayCheck()
 
     var body: some View {
-        Form {
-            Section(header: Text("Self-hosted wake-ups")) {
-                Text(subscription.displayName()).fixedSize(horizontal: false, vertical: true)
-                Text(subscription.baseUrl ?? "").font(.footnote).foregroundColor(.secondary)
-                Text("Check whether ntfy-me.com receives forwarded wake-ups for this topic. This cannot prove delivery to your phone.")
-                    .fixedSize(horizontal: false, vertical: true)
-                if check.state != .consent {
-                    Button("Check relay support") {
-                        check.prepare(baseUrl: subscription.baseUrl ?? "", topic: subscription.topic ?? "")
-                    }.disabled(check.state.isBusy)
-                }
-            }
-            if check.state == .consent {
-                Section(header: Text("Send a visible test?")) {
-                    Text("This sends one ordinary test message to this topic, visible to everyone subscribed. It uses your topic server's credentials and encryption settings. The relay receives only the topic hash, without your message or credentials.")
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button("Send one test message", action: sendTest)
-                    Button("Cancel", action: check.cancel)
-                }
-            }
-            if let message = check.state.message {
-                Section(header: Text("Check result")) {
-                    Text(message).fixedSize(horizontal: false, vertical: true)
-                        .accessibilityIdentifier("relay-check-result")
-                    if check.state.isBusy {
-                        Button("Cancel check", action: check.cancel)
-                    }
-                }
-            }
-            Section(header: Text("Server setup")) {
-                Text("Your server's upstream-base-url must be https://ntfy-me.com. Its configured base-url must exactly match the server address used for this subscription, including scheme, port, path and spelling. The relay keeps only recent acceptance times (up to 2 minutes); it does not report phone delivery.")
-                    .font(.footnote).foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .navigationTitle("Wake-up check")
-        .onDisappear { check.cancel() }
+        RelayCheckContentView(topicName: subscription.displayName(), baseUrl: subscription.baseUrl ?? "",
+            state: check.state,
+            prepare: { check.prepare(baseUrl: subscription.baseUrl ?? "", topic: subscription.topic ?? "") },
+            approve: sendTest, cancel: check.cancel)
+            .onDisappear { check.cancel() }
     }
 
     private func sendTest() {
@@ -173,4 +141,55 @@ struct RelayTopicCheckView: View {
                 completionHandler: { completion(nil) }, failureHandler: { completion($0.userMessage) })
         }
     }
+}
+
+
+/// Pure presentation shared by the live flow and the simulator visual checks.
+struct RelayCheckContentView: View {
+    let topicName: String
+    let baseUrl: String
+    let state: RelayCheck.State
+    let prepare: () -> Void
+    let approve: () -> Void
+    let cancel: () -> Void
+
+    var body: some View {
+        Form {
+            Section(header: Text("Self-hosted wake-ups")) {
+                Text(topicName).fixedSize(horizontal: false, vertical: true)
+                Text(baseUrl).font(.footnote).foregroundColor(.secondary)
+                Text("Check whether ntfy-me.com receives forwarded wake-ups for this topic. This cannot prove delivery to your phone.")
+                    .fixedSize(horizontal: false, vertical: true)
+                if state != .consent {
+                    Button("Check relay support") {
+                        prepare()
+                    }.disabled(state.isBusy)
+                }
+            }
+            if state == .consent {
+                Section(header: Text("Send a visible test?")) {
+                    Text("This sends one ordinary test message to this topic, visible to everyone subscribed. It uses your topic server's credentials and encryption settings. The relay receives only the topic hash, without your message or credentials.")
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Send one test message", action: approve)
+                    Button("Cancel", action: cancel)
+                }
+            }
+            if let message = state.message {
+                Section(header: Text("Check result")) {
+                    Text(message).fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("relay-check-result")
+                    if state.isBusy {
+                        Button("Cancel check", action: cancel)
+                    }
+                }
+            }
+            Section(header: Text("Server setup")) {
+                Text("Your server's upstream-base-url must be https://ntfy-me.com. Its configured base-url must exactly match the server address used for this subscription, including scheme, port, path and spelling. The relay keeps only recent acceptance times (up to 2 minutes); it does not report phone delivery.")
+                    .font(.footnote).foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .navigationTitle("Wake-up check")
+    }
+
 }
