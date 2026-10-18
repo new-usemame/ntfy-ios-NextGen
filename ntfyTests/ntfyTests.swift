@@ -7364,6 +7364,10 @@ final class DeliveryReceiptSignalTests: XCTestCase {
         let monitor = DeliveryHealthMonitor.shared
         let key = topic.objectID.uriRepresentation().absoluteString
         monitor.register(store.pollRequest(for: topic)!)
+        // Let the store's startup/save notifications (coalesced for 300 ms) finish first.
+        let settled = expectation(description: "database broadcasts settled")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { settled.fulfill() }
+        wait(for: [settled], timeout: 3)
         monitor.record(key: key, failure: .unreachable)
         // The earlier Core Data broadcast has no receipt yet; the later signal must recover it.
         monitor.refreshReceipts()

@@ -2,7 +2,7 @@ import Foundation
 import Combine
 
 final class DeliveryHealthMonitor: ObservableObject {
-    static let shared = DeliveryHealthMonitor(defaults: UserDefaults(suiteName: Store.appGroup) ?? .standard)
+    static let shared = DeliveryHealthMonitor(defaults: UserDefaults(suiteName: Store.appGroup) ?? .standard, observeExternalReceipts: true)
     @Published private(set) var topics: [String: TopicDeliveryHealth] = [:]
     @Published private(set) var known: Set<String> = []
     private let defaults: UserDefaults?
@@ -10,8 +10,16 @@ final class DeliveryHealthMonitor: ObservableObject {
     private var failedAt: [String: Double] = [:]
     private var observers: [NSObjectProtocol] = []
 
-    init(defaults: UserDefaults? = nil) {
+    init(defaults: UserDefaults? = nil, observeExternalReceipts: Bool = false) {
         self.defaults = defaults
+        if observeExternalReceipts {
+            // Only the process-lifetime singleton observes Darwin notifications; no object pointer
+            // crosses processes, and publication stays on the main thread.
+            CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), nil,
+                { _, _, _, _, _ in
+                    DispatchQueue.main.async { DeliveryHealthMonitor.shared.refreshReceipts() }
+                }, DeliveryReceipt.externalChanged as CFString, nil, .deliverImmediately)
+        }
         for name in [Store.didChangeRemotely, DeliveryReceipt.changed] {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 self?.refreshReceipts()
@@ -30,6 +38,7 @@ final class DeliveryHealthMonitor: ObservableObject {
     func received(key: String) { record(key: key, failure: nil) }
 
     func refreshReceipts() {
+        defaults?.synchronize()
         let receipts = defaults?.dictionary(forKey: DeliveryReceipt.key) as? [String: Double] ?? [:]
         for (key, identity) in identities where topics[key] != nil {
             if (receipts[identity] ?? 0) > (failedAt[key] ?? .greatestFiniteMagnitude) { received(key: key) }

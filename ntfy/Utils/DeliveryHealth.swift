@@ -262,6 +262,7 @@ enum RegistrationRepair {
 /// These timestamps contain no message content or credentials; Core Data needs no new field.
 enum DeliveryReceipt {
     static let changed = Foundation.Notification.Name("DeliveryReceiptChanged")
+    static let externalChanged = "net.ntfy.deliveryHealthReceiptChanged"
     static let key = "deliveryHealthPushReceipts"
     static func identity(baseUrl: String, topic: String) -> String { topicUrl(baseUrl: normalizeBaseUrl(baseUrl), topic: topic) }
     static func record(baseUrl: String, topic: String) {
@@ -271,6 +272,10 @@ enum DeliveryReceipt {
         receipts = receipts.filter { $0.value > date - 86400 }
         receipts[identity(baseUrl: baseUrl, topic: topic)] = date
         defaults.set(receipts, forKey: key)
+        // Publish after the cross-process defaults write, independently of the earlier database save.
+        defaults.synchronize()
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+            CFNotificationName(externalChanged as CFString), nil, nil, true)
         NotificationCenter.default.post(name: changed, object: nil)
     }
 }
