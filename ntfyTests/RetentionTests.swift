@@ -7,6 +7,25 @@ final class RetentionTests: XCTestCase {
     private var store: Store { Store.shared }
     private var subscriptions: [ntfy.Subscription] = []
 
+    override func setUp() {
+        super.setUp()
+        store.clearPublisher = { _, done in done(.sent) }
+        installClearPacer()
+        if store.notificationRetention() != .forever { store.saveNotificationRetention(.forever) }
+        store.notificationRemover = { _ in }
+        store.notificationBatchRemover = { _ in }
+        store.topicNotificationRemover = { _, _, _, _ in }
+        store.wakePublisher = { _, done in done() }
+    }
+
+    private func installClearPacer() {
+        let pacer = ClearPacer()
+        var clock = Date(timeIntervalSince1970: 1_000_000)
+        pacer.now = { clock }
+        pacer.schedule = { delay, work in clock += delay; work() }
+        store.clearPacer = pacer
+    }
+
     override func tearDown() {
         store.context.performAndWait {
             subscriptions.forEach { store.context.delete($0) }
@@ -14,6 +33,18 @@ final class RetentionTests: XCTestCase {
         }
         subscriptions = []
         super.tearDown()
+    }
+
+    private func closeDiskStores(_ stores: [Store]) {
+        for store in stores {
+            store.retentionContext.performAndWait { store.retentionContext.reset() }
+            store.context.performAndWait {
+                store.context.automaticallyMergesChangesFromParent = false
+                store.context.reset()
+            }
+            let coordinator = store.container.persistentStoreCoordinator
+            for disk in coordinator.persistentStores { try? coordinator.remove(disk) }
+        }
     }
 
     private func fixture(_ count: Int) throws -> ntfy.Subscription {
@@ -140,7 +171,7 @@ final class RetentionTests: XCTestCase {
     }
 
     func testPagingDoesNotNarrowReadCountsOrClearAllAndDeleteRemovesVisibleRowsImmediately() throws {
-        store.clearPublisher = { _, done in done(true) }
+        store.clearPublisher = { _, done in done(.sent) }
         store.wakePublisher = { _, done in done() }
         store.notificationRemover = { _ in }
         let sub = try fixture(151)
@@ -156,7 +187,9 @@ final class RetentionTests: XCTestCase {
         store.delete(notification: try XCTUnwrap(model.notifications.first))
         XCTAssertEqual(model.notifications.count, 50)
         XCTAssertFalse(model.notifications.contains { $0.isDeleted || $0.managedObjectContext == nil })
-        store.delete(allNotificationsFor: sub)
+        let deletedAll = expectation(description: "all pages deleted")
+        store.delete(allNotificationsFor: sub) { deletedAll.fulfill() }
+        wait(for: [deletedAll], timeout: 10)
         XCTAssertTrue(model.notifications.isEmpty)
         XCTAssertEqual(try store.context.count(for: request), 0)
         XCTAssertEqual(sub.unreadCount(), 0)
@@ -166,16 +199,19 @@ final class RetentionTests: XCTestCase {
     func testCrossCoordinatorPushMergesIntoOpenPageWithoutRefetch() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
+        var diskStores: [Store] = []
+        defer { closeDiskStores(diskStores); try? FileManager.default.removeItem(at: dir) }
         let url = dir.appendingPathComponent("shared.sqlite")
         // Distinct persistent-store coordinators model the app and NSE processes, not merely two
         // contexts whose saves automatically merge from the same parent.
         let app = Store(inMemory: true, storeURL: url)
+        diskStores.append(app)
         app.saveNotificationRetention(.forever)
         let sub = app.saveSubscription(baseUrl: "https://retention.example", topic: "cross-process")
         let model = NotificationsObservable(subscriptionID: sub.objectID, context: app.context)
         let fetches = model.fetchCount
         let writer = Store(inMemory: true, storeURL: url)
+        diskStores.append(writer)
         writer.context.transactionAuthor = "ntfy.appex"
         let message = Message(id: "nse-writer", time: Int64(Date().timeIntervalSince1970), event: "message", topic: "cross-process", message: "written by push")
         XCTAssertNotNil(writer.ingest(pushedMessage: message, baseUrl: "https://retention.example", topic: "cross-process"))
@@ -197,9 +233,11 @@ final class RetentionTests: XCTestCase {
     func testPruneCannotDeleteARowUpdatedByPushAfterItsFetch() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
+        var diskStores: [Store] = []
+        defer { closeDiskStores(diskStores); try? FileManager.default.removeItem(at: dir) }
         let url = dir.appendingPathComponent("shared.sqlite")
         let app = Store(inMemory: true, storeURL: url)
+        diskStores.append(app)
         app.saveNotificationRetention(.month)
         let sub = app.saveSubscription(baseUrl: "https://retention.example", topic: "race")
         let now = Date()
@@ -212,6 +250,7 @@ final class RetentionTests: XCTestCase {
         row.subscription = sub
         try app.context.save()
         let writer = Store(inMemory: true, storeURL: url)
+        diskStores.append(writer)
         writer.context.transactionAuthor = "ntfy.appex"
         let file = dir.appendingPathComponent("incoming-attachment")
         try Data("new attachment".utf8).write(to: file)
@@ -307,7 +346,8 @@ final class RetentionTests: XCTestCase {
     func testModel6HistoryMigratesWithoutDeletingRowsOrAttachmentPaths() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
+        var diskStores: [Store] = []
+        defer { closeDiskStores(diskStores); try? FileManager.default.removeItem(at: dir) }
         let url = dir.appendingPathComponent("old.sqlite")
         try autoreleasepool {
             let modelURL = try XCTUnwrap(Bundle.main.url(forResource: "ntfy", withExtension: "momd"))
@@ -331,6 +371,7 @@ final class RetentionTests: XCTestCase {
             try coordinator.remove(disk)
         }
         let migrated = Store(inMemory: true, storeURL: url)
+        diskStores.append(migrated)
         let rows = try migrated.context.fetch(ntfy.Notification.fetchRequest())
         XCTAssertEqual(rows.compactMap(\.id), ["model6-history"])
         XCTAssertEqual(rows.first?.attachmentLocalPath, "/example/attachment")
@@ -434,4 +475,251 @@ final class RetentionTests: XCTestCase {
         XCTAssertEqual(model.notifications.count, 50, "Opening a topic must not publish its entire history")
         XCTAssertEqual(model.notifications.first?.time, 1_790_009_999)
     }
+    func testMissingAttachmentParentAndNonDirectoryRetireQueueEntries() throws {
+        let isolated = Store(inMemory: true)
+        isolated.saveNotificationRetention(.forever)
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let regularFile = dir.appendingPathComponent("not-a-directory")
+        try Data().write(to: regularFile)
+        for path in [dir.appendingPathComponent("gone-container/file").path, regularFile.appendingPathComponent("file").path] {
+            let entry = NSEntityDescription.insertNewObject(forEntityName: "PendingAttachmentDeletion", into: isolated.context)
+            entry.setValue(path, forKey: "path")
+        }
+        try isolated.context.save()
+        let done = expectation(description: "missing paths retired")
+        isolated.pruneNotifications { _ in done.fulfill() }
+        wait(for: [done], timeout: 10)
+        XCTAssertEqual(try isolated.context.count(for: NSFetchRequest<NSManagedObject>(entityName: "PendingAttachmentDeletion")), 0)
+    }
+
+    func testPresentedDeliveryEvidenceSurvivesRetentionAndReopening() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var diskStores: [Store] = []
+        defer { closeDiskStores(diskStores); try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("review.sqlite")
+        let isolated = Store(inMemory: true, storeURL: url)
+        diskStores.append(isolated)
+        isolated.saveNotificationRetention(.day)
+        let sub = isolated.saveSubscription(baseUrl: "https://retention.example", topic: "review")
+        let now = Date()
+        for i in 0..<3 {
+            let row = ntfy.Notification(context: isolated.context)
+            row.id = "review-\(i)"; row.message = "delivered"; row.subscription = sub
+            row.time = Int64(now.timeIntervalSince1970) - Int64((i + 2) * 86_400)
+            row.presented = true
+        }
+        try isolated.context.save()
+        let before = isolated.presentedDeliveries()
+        let done = expectation(description: "review rows expired")
+        isolated.pruneNotifications(now: now) { result in
+            XCTAssertEqual(try? result.get(), 3); done.fulfill()
+        }
+        wait(for: [done], timeout: 10)
+        XCTAssertEqual(try isolated.context.count(for: ntfy.Notification.fetchRequest()), 0)
+        let reopened = Store(inMemory: true, storeURL: url)
+        diskStores.append(reopened)
+        XCTAssertEqual(reopened.presentedDeliveries().count, before.count)
+        XCTAssertGreaterThanOrEqual(reopened.presentedDeliveries().days, 2)
+    }
+
+    func testPollDropsExpiredMessagesWithoutPresentationOrUnreadButAdvancesCursor() throws {
+        let isolated = Store(inMemory: true)
+        isolated.saveNotificationRetention(.day)
+        let sub = isolated.saveSubscription(baseUrl: "https://retention.example", topic: "old-cache")
+        let now = Int64(Date().timeIntervalSince1970)
+        let old = Message(id: "expired-cache", time: now - 3 * 86_400, event: "message", topic: "old-cache", message: "old")
+        let request = try XCTUnwrap(isolated.pollRequest(for: sub))
+        XCTAssertEqual(isolated.save(notificationsFromMessages: [old], polledWith: request)?.count, 0)
+        XCTAssertEqual(try isolated.context.count(for: ntfy.Notification.fetchRequest()), 0)
+        XCTAssertEqual(isolated.totalUnreadCount(), 0)
+        XCTAssertEqual(sub.lastNotificationId, old.id, "discarded cache must not be polled forever")
+        isolated.saveNotificationRetention(.forever)
+        XCTAssertEqual(isolated.save(notificationsFromMessages: [old], polledWith: request)?.count, 1)
+    }
+
+    func testUnreadHeavyScaleMeasurement10k() throws {
+        let sub = try fixture(10_000)
+        let request = ntfy.Notification.fetchRequest()
+        request.predicate = NSPredicate(format: "subscription == %@", sub)
+        for row in try store.context.fetch(request) { row.read = false }
+        try store.context.save()
+        store.hardRefresh()
+        let start = CFAbsoluteTimeGetCurrent()
+        let model = NotificationsObservable(subscriptionID: sub.objectID)
+        store.setRead(true, forSubscription: sub)
+        let opened = CFAbsoluteTimeGetCurrent()
+        let materialized = store.context.registeredObjects.filter { $0.entity.name == "Notification" && !$0.isFault }.count
+        store.markMostRecentUnread(subscription: sub)
+        let marked = CFAbsoluteTimeGetCurrent()
+        print("RETENTION_UNREAD_SCALE rows=10000 open_and_read_ms=\((opened-start)*1000) mark_newest_ms=\((marked-opened)*1000) materialized=\(materialized) published=\(model.notifications.count)")
+        XCTAssertEqual(model.notifications.count, 50)
+        XCTAssertLessThanOrEqual(materialized, 60, "opening must not materialize every unread row")
+        let deletion = expectation(description: "10k history deleted off main")
+        var largestChunk = 0
+        let chunkObserver = NotificationCenter.default.addObserver(forName: .NSManagedObjectContextWillSave, object: store.retentionContext, queue: nil) { _ in
+            largestChunk = max(largestChunk, self.store.retentionContext.deletedObjects.count)
+            XCTAssertFalse(Thread.isMainThread, "history deletion must run on the private queue")
+        }
+        defer { NotificationCenter.default.removeObserver(chunkObserver) }
+        let deleteStart = CFAbsoluteTimeGetCurrent()
+        store.delete(allNotificationsFor: sub) { deletion.fulfill() }
+        let enqueued = CFAbsoluteTimeGetCurrent()
+        wait(for: [deletion], timeout: 30)
+        let finished = CFAbsoluteTimeGetCurrent()
+        print("RETENTION_UNREAD_DELETE rows=10000 enqueue_ms=\((enqueued-deleteStart)*1000) complete_ms=\((finished-deleteStart)*1000) largest_chunk=\(largestChunk)")
+        XCTAssertGreaterThan(largestChunk, 0)
+        XCTAssertLessThanOrEqual(largestChunk, 200)
+        XCTAssertEqual(try store.context.count(for: request), 0)
+    }
+
+    func testRetentionSelectionStartsStoredAndCancelDoesNotDeleteThenConfirmPrunes() throws {
+        let isolated = Store(inMemory: true)
+        isolated.saveNotificationRetention(.forever)
+        let sub = isolated.saveSubscription(baseUrl: "https://retention.example", topic: "confirmation")
+        let row = ntfy.Notification(context: isolated.context)
+        row.id = "confirmation-old"; row.message = "old unread"; row.read = false
+        row.time = Int64(Date().timeIntervalSince1970) - 10 * 86_400; row.subscription = sub
+        try isolated.context.save()
+        let selection = RetentionSelection(store: isolated)
+        XCTAssertEqual(selection.policy, .forever)
+        let counted = expectation(description: "count before asking")
+        var observer = selection.$prompt.compactMap { $0 }.sink { prompt in
+            XCTAssertEqual(prompt.count, 1); counted.fulfill()
+        }
+        selection.select(.day)
+        wait(for: [counted], timeout: 10)
+        observer.cancel()
+        XCTAssertEqual(isolated.notificationRetention(), .forever)
+        XCTAssertEqual(try isolated.context.count(for: ntfy.Notification.fetchRequest()), 1)
+        selection.cancel()
+        XCTAssertEqual(selection.policy, .forever)
+        XCTAssertNil(selection.prompt)
+        let askedAgain = expectation(description: "ask again after cancel")
+        observer = selection.$prompt.compactMap { $0 }.sink { _ in askedAgain.fulfill() }
+        selection.select(.day)
+        wait(for: [askedAgain], timeout: 10)
+        observer.cancel()
+        selection.confirm(.day)
+        XCTAssertEqual(isolated.notificationRetention(), .day)
+        let pruned = expectation(description: "setting triggers pruning before queued maintenance")
+        isolated.pruneNotifications { _ in pruned.fulfill() }
+        wait(for: [pruned], timeout: 10)
+        XCTAssertEqual(try isolated.context.count(for: ntfy.Notification.fetchRequest()), 0)
+        let reopenedSelection = RetentionSelection(store: isolated)
+        XCTAssertEqual(reopenedSelection.policy, .day, "picker must start at persisted value")
+    }
+
+    func testSearchDebouncesAndMatchingLivePushDoesNotRefetch() throws {
+        let sub = try fixture(151)
+        let model = NotificationsObservable(subscriptionID: sub.objectID)
+        let initial = model.fetchCount
+        model.scheduleSearch("back"); model.scheduleSearch("backup"); model.scheduleSearch("sample 0:")
+        XCTAssertEqual(model.fetchCount, initial, "keystrokes must not synchronously scan history")
+        let settled = expectation(description: "debounced search settled")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { settled.fulfill() }
+        wait(for: [settled], timeout: 2)
+        XCTAssertEqual(model.fetchCount, initial + 1)
+        XCTAssertEqual(model.notifications.count, 1)
+        let push = Message(id: "matching-search", time: Int64(Date().timeIntervalSince1970), event: "message", topic: sub.topic!, message: "sample 0: new push")
+        _ = store.ingest(pushedMessage: push, baseUrl: sub.baseUrl!, topic: sub.topic!)
+        XCTAssertEqual(model.notifications.first?.id, push.id)
+        XCTAssertEqual(model.fetchCount, initial + 1)
+    }
+
+    func testStoreInitializationDoesNotNeedTheMainQueue() {
+        let done = DispatchSemaphore(value: 0)
+        var created: Store?
+        let cleaned = expectation(description: "background init fixture closed")
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let isolated = Store(inMemory: false, storeURL: dir.appendingPathComponent("init.sqlite"))
+            created = isolated
+            done.signal()
+            DispatchQueue.main.async {
+                self.closeDiskStores([isolated])
+                try? FileManager.default.removeItem(at: dir)
+                cleaned.fulfill()
+            }
+        }
+        XCTAssertEqual(done.wait(timeout: .now() + 3), .success, "init must not wait on the blocked main queue")
+        XCTAssertEqual(created?.context.automaticallyMergesChangesFromParent, true, "first main-thread use must be configured before its queued setup runs")
+        XCTAssertEqual(created?.context.transactionAuthor, "ntfy")
+        wait(for: [cleaned], timeout: 10)
+    }
+
+    func testPagingIndexIsInTheShippedModel() throws {
+        let entity = try XCTUnwrap(store.container.managedObjectModel.entitiesByName["Notification"])
+        let index = try XCTUnwrap(entity.indexes.first { $0.name == "notificationPage" })
+        XCTAssertEqual(index.elements.compactMap { $0.property?.name }, ["subscription", "time", "id"])
+    }
+
+    func testNSEHistoryTrimDoesNotNeedToPruneMessageRows() throws {
+        let isolated = Store(inMemory: true)
+        let sub = isolated.saveSubscription(baseUrl: "https://retention.example", topic: "nse-trim")
+        isolated.save(notificationsFromMessages: [Message(id: "keep-history-row", time: 1, event: "message", topic: sub.topic!, message: "keep")], withSubscription: sub)
+        let trimmed = expectation(description: "extension maintenance trimmed history")
+        isolated.trimPersistentHistory(now: Date().addingTimeInterval(8 * 86_400)) { trimmed.fulfill() }
+        wait(for: [trimmed], timeout: 10)
+        let result = try isolated.context.execute(NSPersistentHistoryChangeRequest.fetchHistory(after: Date.distantPast)) as? NSPersistentHistoryResult
+        XCTAssertTrue((result?.result as? [NSPersistentHistoryTransaction] ?? []).isEmpty)
+        XCTAssertEqual(try isolated.context.count(for: ntfy.Notification.fetchRequest()), 1)
+    }
+
+    func testLocalHistoryDoesNotBroadcastAnExtensionChange() {
+        let isolated = Store(inMemory: true)
+        _ = isolated.saveSubscription(baseUrl: "https://retention.example", topic: "own-history")
+        var broadcasts = 0
+        let observer = NotificationCenter.default.addObserver(forName: Store.didChangeRemotely, object: nil, queue: nil) { _ in broadcasts += 1 }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        let merged = expectation(description: "own history consumed")
+        isolated.mergeRemoteHistory { merged.fulfill() }
+        wait(for: [merged], timeout: 10)
+        XCTAssertEqual(broadcasts, 0)
+    }
+
+    func testBulkReadKeepsConcurrentPushUnreadAndHistoryMergeBounded() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var diskStores: [Store] = []
+        defer { closeDiskStores(diskStores); try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("read-race.sqlite")
+        let app = Store(inMemory: true, storeURL: url)
+        diskStores.append(app)
+        app.saveNotificationRetention(.forever)
+        let sub = app.saveSubscription(baseUrl: "https://retention.example", topic: "read-race")
+        for i in 0..<1000 {
+            let row = ntfy.Notification(context: app.context)
+            row.id = "read-race-\(i)"; row.time = Int64(i); row.message = "old unread"
+            row.read = false; row.subscription = sub
+        }
+        try app.context.save(); app.hardRefresh()
+        let writer = Store(inMemory: true, storeURL: url)
+        diskStores.append(writer)
+        writer.context.transactionAuthor = "ntfy.appex"
+        let model = NotificationsObservable(subscriptionID: sub.objectID, context: app.context)
+        let pending = Preference(context: app.context); pending.key = "pending-read-race"; pending.value = "1"
+        let observer = NotificationCenter.default.addObserver(forName: .NSManagedObjectContextWillSave, object: app.context, queue: nil) { _ in
+            let message = Message(id: "new-during-read", time: Int64(Date().timeIntervalSince1970), event: "message", topic: "read-race", message: "new unread")
+            XCTAssertNotNil(writer.ingest(pushedMessage: message, baseUrl: sub.baseUrl!, topic: sub.topic!))
+        }
+        app.notificationRemover = { _ in }; app.topicNotificationRemover = { _, _, _, _ in }
+        app.clearPublisher = { _, done in done(.sent) }
+        var clock = Date(timeIntervalSince1970: 1_000_000)
+        app.clearPacer.schedule = { delay, work in clock += delay; work() }
+        app.clearPacer.now = { clock }
+        app.setRead(true, forSubscription: sub)
+        NotificationCenter.default.removeObserver(observer)
+        XCTAssertEqual(app.totalUnreadCount(), 1, "push committed after the read action began stays unread")
+        let merged = expectation(description: "read and incoming push history merged")
+        app.mergeRemoteHistory { merged.fulfill() }
+        wait(for: [merged], timeout: 10)
+        XCTAssertEqual(model.notifications.first?.id, "new-during-read")
+        XCTAssertEqual(model.notifications.first?.read, false)
+        XCTAssertLessThanOrEqual(app.context.registeredObjects.filter { $0.entity.name == "Notification" && !$0.isFault }.count, 65)
+    }
+
 }

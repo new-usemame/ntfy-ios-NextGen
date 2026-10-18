@@ -52,7 +52,7 @@ struct NotificationListView: View {
             .searchable(text: $searchText, prompt: NotificationHistoryStrings.search)
             .onChange(of: searchText) { value in
                 selection = []
-                notificationsModel.search(value)
+                notificationsModel.scheduleSearch(value)
             }
             .refreshable {
                 _ = await pollOnce()
@@ -155,7 +155,7 @@ struct NotificationListView: View {
                         Button("Send test notification") {
                             self.sendTestNotification()
                         }
-                        if notificationsModel.notifications.count > 0 {
+                        if searchText.isEmpty && notificationsModel.notifications.count > 0 {
                             Button("Clear all notifications") {
                                 self.showAlert = true
                                 self.activeAlert = .clear

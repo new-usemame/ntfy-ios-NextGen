@@ -24,7 +24,7 @@ struct SettingsView: View {
                     AttachmentAutoDownloadView()
                 }
                 NotificationStatusView()
-                RetentionSettingsView()
+                RetentionSettingsView(store: store)
                 UrgentAlertsSettingView()
                 Section(
                     header: Text("Users"),

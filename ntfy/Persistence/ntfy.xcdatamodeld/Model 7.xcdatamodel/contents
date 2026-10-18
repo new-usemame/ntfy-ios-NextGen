@@ -27,6 +27,11 @@
         <attribute name="time" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
         <attribute name="title" optional="YES" attributeType="String"/>
         <relationship name="subscription" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="Subscription" inverseName="notifications" inverseEntity="Subscription"/>
+        <fetchIndex name="notificationPage">
+            <fetchIndexElement property="subscription" type="Binary" order="ascending"/>
+            <fetchIndexElement property="time" type="Binary" order="descending"/>
+            <fetchIndexElement property="id" type="Binary" order="descending"/>
+        </fetchIndex>
         <uniquenessConstraints>
             <uniquenessConstraint>
                 <constraint value="id"/>

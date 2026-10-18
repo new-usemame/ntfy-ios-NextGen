@@ -1,28 +1,26 @@
 import SwiftUI
 
 struct RetentionSettingsView: View {
-    @EnvironmentObject private var store: Store
-    @State private var showSaveError = false
-    @State private var policy: NotificationRetention = .forever
+    @StateObject private var selection: RetentionSelection
+
+    init(store: Store) { _selection = StateObject(wrappedValue: RetentionSelection(store: store)) }
 
     var body: some View {
         Section(header: Text(NotificationHistoryStrings.section), footer: Text(NotificationHistoryStrings.explanation)) {
-            Picker(NotificationHistoryStrings.title, selection: $policy) {
+            Picker(NotificationHistoryStrings.title, selection: Binding(get: { selection.policy }, set: selection.select)) {
                 ForEach(NotificationRetention.allCases, id: \.self) { option in
                     Text(option.label).tag(option)
                 }
             }
-            .onAppear { policy = store.notificationRetention() }
-            .onChange(of: policy) { value in
-                guard value != store.notificationRetention() else { return }
-                if !store.saveNotificationRetention(value) {
-                    policy = store.notificationRetention()
-                    showSaveError = true
-                }
-            }
         }
-        .alert(isPresented: $showSaveError) {
-            Alert(title: Text(NotificationHistoryStrings.saveError), message: Text(NotificationHistoryStrings.saveErrorExplanation))
+        .alert(item: $selection.prompt) { prompt in
+            if let policy = prompt.policy {
+                return Alert(title: Text(NotificationHistoryStrings.confirmation(prompt.count, policy)),
+                    message: Text(NotificationHistoryStrings.confirmExplanation),
+                    primaryButton: .destructive(Text(NotificationHistoryStrings.delete)) { selection.confirm(policy) },
+                    secondaryButton: .cancel(Text(NotificationHistoryStrings.cancel)) { selection.cancel() })
+            }
+            return Alert(title: Text(NotificationHistoryStrings.saveError), message: Text(NotificationHistoryStrings.saveErrorExplanation))
         }
     }
 }

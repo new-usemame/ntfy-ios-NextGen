@@ -1,5 +1,6 @@
 import CoreData
 import SwiftUI
+import Combine
 
 /// A bounded window, updated from context change IDs (including merged NSE history).
 /// Older pages use (time, id), so a new push never shifts a fetch offset or skips a row.
@@ -8,6 +9,8 @@ class NotificationsObservable: NSObject, ObservableObject {
     private let subscriptionID: NSManagedObjectID
     private let context: NSManagedObjectContext
     private var observers: [NSObjectProtocol] = []
+    private var searchSubscription: AnyCancellable?
+    private let searchInput = PassthroughSubject<String, Never>()
     private var query = ""
     private var capacity = pageSize
     @Published private(set) var notifications: [Notification] = []
@@ -19,6 +22,8 @@ class NotificationsObservable: NSObject, ObservableObject {
         self.context = context
         super.init()
         refetch()
+        searchSubscription = searchInput.debounce(for: .milliseconds(300), scheduler: DispatchQueue.main)
+            .sink { [weak self] in self?.search($0) }
         observers.append(NotificationCenter.default.addObserver(
             forName: .NSManagedObjectContextObjectsDidChange, object: context, queue: nil
         ) { [weak self] in self?.apply($0) })
@@ -60,6 +65,8 @@ class NotificationsObservable: NSObject, ObservableObject {
         } catch { Log.w("NotificationsObservable", "Cannot load notifications", error) }
     }
 
+    func scheduleSearch(_ text: String) { searchInput.send(text) }
+
     func search(_ text: String) {
         guard query != text else { return }
         query = text
@@ -92,9 +99,10 @@ class NotificationsObservable: NSObject, ObservableObject {
         guard !removedIDs.isDisjoint(with: loadedIDs) || !rows.isEmpty else { return }
         let changedIDs = Set(rows.map(\.objectID))
         var result = notifications.filter { !removedIDs.contains($0.objectID) && !changedIDs.contains($0.objectID) }
+        let boundary = notifications.last { !removedIDs.contains($0.objectID) && !$0.isDeleted }
         for row in rows where !row.isDeleted && row.managedObjectContext != nil && matches(row) {
             // Keep a contiguous window. A changed row beyond its bottom belongs to a later page.
-            if !hasOlder || notifications.last.map({ precedes(row, $0) || row.objectID == $0.objectID }) != false {
+            if !hasOlder || boundary.map({ precedes(row, $0) || row.objectID == $0.objectID }) != false {
                 result.append(row)
             }
         }
