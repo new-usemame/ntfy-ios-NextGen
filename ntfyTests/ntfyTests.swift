@@ -474,6 +474,18 @@ final class ntfyTests: XCTestCase {
         XCTAssertEqual(UIPasteboard.general.string, "ABC-123")
     }
 
+    func testOnlyACopyActionWithAValueGetsTheCopiedConfirmation() {
+        var copy = Action(id: "c", action: "copy", label: "Copy code",
+                          url: nil, method: nil, headers: nil, body: nil, clear: nil)
+        XCTAssertFalse(copy.copiesText, "nothing is copied without a value, so nothing to confirm")
+        copy.value = "ABC-123"
+        XCTAssertTrue(copy.copiesText)
+        var view = Action(id: "v", action: "view", label: "Open",
+                          url: "https://example.com", method: nil, headers: nil, body: nil, clear: nil)
+        view.value = "ignored"
+        XCTAssertFalse(view.copiesText)
+    }
+
     // MARK: Actions.encode — nil round-trips to empty string
 
     func testActionsEncodeNilIsEmptyString() {
