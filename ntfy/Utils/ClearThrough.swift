@@ -133,7 +133,7 @@ final class ClearThroughCoordinator {
 
     private func poll(_ work: Work, selectingBoundary: Bool = false, missingBoundary: Bool = false) {
         guard current(work) else { return }
-        guard cooldown.claim(server: work.boundary.baseUrl, manual: false, kind: .clearThrough) else { deferWork(work, failure: .rateLimited); return }
+        guard cooldown.claim(server: work.boundary.baseUrl, manual: false, kind: .poll) else { deferWork(work, failure: .rateLimited); return }
         guard let url = URL(string: "\(topicUrl(baseUrl: work.boundary.baseUrl, topic: work.boundary.topic))/json?poll=1&since=all") else {
             deferWork(work, failure: .other); return
         }
@@ -146,7 +146,7 @@ final class ClearThroughCoordinator {
                       let messages = Self.messages(data) else {
                     if http?.statusCode == 429 {
                         self.cooldown.limit(server: work.boundary.baseUrl, retryAfter: http?.value(forHTTPHeaderField: "Retry-After"),
-                                            condition: http?.value(forHTTPHeaderField: "Retry-After-Condition"), kind: .clearThrough)
+                                            condition: http?.value(forHTTPHeaderField: "Retry-After-Condition"), kind: .poll)
                     }
                     let failure: PollFailure = [401, 403].contains(http?.statusCode ?? 0) ? .unauthorized
                         : http?.statusCode == 429 ? .rateLimited : error != nil ? .unreachable : .other
