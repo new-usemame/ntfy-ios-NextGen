@@ -7385,3 +7385,36 @@ final class DeliveryReceiptSignalTests: XCTestCase {
         wait(for: [recovered], timeout: 2)
     }
 }
+
+
+// Regression coverage for ntfy's wire-level encoding field (issue #7).
+final class MessageEncodingTests: XCTestCase {
+    private func decode(_ message: String, encoding: String? = nil) throws -> Message {
+        var fields: [String: Any] = [
+            "id": "m1", "time": 1, "event": "message", "topic": "test",
+            "message": message
+        ]
+        if let encoding { fields["encoding"] = encoding }
+        let data = try JSONSerialization.data(withJSONObject: fields)
+        return try JSONDecoder().decode(Message.self, from: data)
+    }
+
+    func testBase64MessageDecodesUTF8Text() throws {
+        XCTAssertEqual(try decode("SGVsbG8g8J+Riw==", encoding: "base64").message, "Hello 👋")
+    }
+
+    func testBinaryBase64DoesNotAppearAsRawBase64() throws {
+        let decoded = try decode("/wAB", encoding: "base64")
+        XCTAssertEqual(decoded.message, "This notification contains non-text data (base64).")
+    }
+
+    func testPlainMessagesRemainUnchanged() throws {
+        XCTAssertEqual(try decode("SGVsbG8=").message, "SGVsbG8=")
+        XCTAssertEqual(try decode("A regular message", encoding: "unknown").message, "A regular message")
+    }
+
+    func testMalformedBase64IsNotDisplayedRaw() throws {
+        XCTAssertEqual(try decode("not-base64!", encoding: "base64").message,
+                       "This notification contains non-text data (base64).")
+    }
+}

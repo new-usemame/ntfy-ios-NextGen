@@ -383,6 +383,7 @@ struct Message: Decodable {
         case id, time, event, topic, message, title, priority, tags, actions, click, attachment
         case pollId = "poll_id"
         case contentType = "content_type"
+        case encoding
         case icon
         case sequenceID = "sequence_id"
     }
@@ -427,7 +428,9 @@ struct Message: Decodable {
         time = try container.decode(Int64.self, forKey: .time)
         event = try container.decode(String.self, forKey: .event)
         topic = try container.decode(String.self, forKey: .topic)
-        message = try container.decodeIfPresent(String.self, forKey: .message)
+        let wireMessage = try container.decodeIfPresent(String.self, forKey: .message)
+        let wireEncoding = try container.decodeIfPresent(String.self, forKey: .encoding)
+        message = Self.decodeWireMessage(wireMessage, encoding: wireEncoding)
         title = try container.decodeIfPresent(String.self, forKey: .title)
         priority = try container.decodeIfPresent(Int16.self, forKey: .priority)
         tags = try container.decodeIfPresent([String].self, forKey: .tags)
@@ -440,6 +443,17 @@ struct Message: Decodable {
         sequenceID = try container.decodeIfPresent(String.self, forKey: .sequenceID)
     }
     
+    /// The server base64-encodes payloads that cannot be carried as plain text.
+    /// Never display the encoded bytes as if they were the original message.
+    static func decodeWireMessage(_ value: String?, encoding: String?) -> String? {
+        guard let value, encoding?.lowercased() == "base64" else { return value }
+        guard let data = Data(base64Encoded: value),
+              let decoded = String(data: data, encoding: .utf8) else {
+            return "This notification contains non-text data (base64)."
+        }
+        return decoded
+    }
+
     func toUserInfo() -> [AnyHashable: Any] {
         // This should mimic the way that the ntfy server encodes a message.
         // See server_firebase.go for more details.
