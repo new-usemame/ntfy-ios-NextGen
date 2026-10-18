@@ -747,6 +747,10 @@ class Store: ObservableObject {
                 rollbackAndRefresh()
             }
         }
+        switch stored {
+        case .stored, .handled: DeliveryReceipt.record(baseUrl: baseUrl, topic: topic)
+        default: break // A deferred reconciliation has not demonstrated recovery yet.
+        }
         return stored
     }
 

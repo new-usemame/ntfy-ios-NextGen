@@ -75,15 +75,18 @@ struct NotificationStatusView: View {
         let id = UUID()
         repairID = id
         UIApplication.shared.registerForRemoteNotifications()
-        FcmSubscriptionReconciler.shared.reconcile(reason: "user requested repair") {
-            DispatchQueue.main.async {
-                guard repairID == id else { return }
-                delegate.refreshNotificationSettings {
+        RegistrationRepair.wait(isReady: { delegate.hasPhoneRegistration && delegate.hasPushRegistration }) {
+            guard repairID == id, repairing else { return }
+            FcmSubscriptionReconciler.shared.reconcile(reason: "user requested repair") {
+                DispatchQueue.main.async {
                     guard repairID == id else { return }
-                    repairing = false
-                    let registered = delegate.hasPhoneRegistration && delegate.hasPushRegistration
-                    result = NotificationHealth.repairResult(permission: delegate.notificationAuthorizationStatus,
-                        registered: registered, bindingsComplete: FcmSubscriptionReconciler.shared.isPushSetupComplete)
+                    delegate.refreshNotificationSettings {
+                        guard repairID == id else { return }
+                        repairing = false
+                        let registered = delegate.hasPhoneRegistration && delegate.hasPushRegistration
+                        result = NotificationHealth.repairResult(permission: delegate.notificationAuthorizationStatus,
+                            registered: registered, bindingsComplete: FcmSubscriptionReconciler.shared.isPushSetupComplete)
+                    }
                 }
             }
         }

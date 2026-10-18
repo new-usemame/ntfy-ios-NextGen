@@ -2,51 +2,81 @@ import Foundation
 import Combine
 
 final class DeliveryHealthMonitor: ObservableObject {
-    static let shared = DeliveryHealthMonitor()
+    static let shared = DeliveryHealthMonitor(defaults: UserDefaults(suiteName: Store.appGroup) ?? .standard)
     @Published private(set) var topics: [String: TopicDeliveryHealth] = [:]
+    @Published private(set) var known: Set<String> = []
+    private let defaults: UserDefaults?
+    private var identities: [String: String] = [:]
+    private var failedAt: [String: Double] = [:]
+    private var observers: [NSObjectProtocol] = []
 
-    func record(key: String, failure: PollFailure?) {
+    init(defaults: UserDefaults? = nil) {
+        self.defaults = defaults
+        for name in [Store.didChangeRemotely, DeliveryReceipt.changed] {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.refreshReceipts()
+            })
+        }
+    }
+    deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+
+    func register(_ request: PollRequest) {
+        let update = { self.identities[request.subscriptionID.uriRepresentation().absoluteString] = request.topicUrl }
+        if Thread.isMainThread { update() } else { DispatchQueue.main.async(execute: update) }
+    }
+
+    func healthy(keys: [String]) -> Bool { !keys.isEmpty && keys.allSatisfy { known.contains($0) && topics[$0] == nil } }
+
+    func received(key: String) { record(key: key, failure: nil) }
+
+    func refreshReceipts() {
+        let receipts = defaults?.dictionary(forKey: DeliveryReceipt.key) as? [String: Double] ?? [:]
+        for (key, identity) in identities where topics[key] != nil {
+            if (receipts[identity] ?? 0) > (failedAt[key] ?? .greatestFiniteMagnitude) { received(key: key) }
+        }
+    }
+
+    func record(key: String, failure: PollFailure?, attempted: Bool = true) {
         let update = {
+            if attempted { self.known.insert(key) }
             if failure == nil {
                 if self.topics[key] != nil { self.topics.removeValue(forKey: key) }
+                self.failedAt.removeValue(forKey: key)
             } else {
                 var state = self.topics[key] ?? TopicDeliveryHealth()
-                state.record(failure)
+                state.record(failure, attempted: attempted)
                 self.topics[key] = state
+                self.failedAt[key] = Date().timeIntervalSince1970
             }
         }
         if Thread.isMainThread { update() } else { DispatchQueue.main.async(execute: update) }
     }
 }
 
-/// One process-wide gate for automatic polls. Manual refresh joins an in-flight request instead
-/// of racing it, and bypasses ordinary cooldowns, but never a server's rate limit.
-/// Only server cooldown deadlines persist; no Core Data schema or message state is involved.
+/// The list alone uses the minimum interval. Live reads, test sends and silent wakes need fresh
+/// answers. Every caller joins an existing fetch and respects the shared server rate-limit brake.
 final class PollCoordinator {
-    static let shared = PollCoordinator(defaults: UserDefaults(suiteName: Store.appGroup) ?? .standard)
-    private static let cooldownKey = "deliveryHealthServerCooldowns"
+    static let shared = PollCoordinator(cooldown: .shared)
     private let lock = NSLock()
-    private let defaults: UserDefaults?
     private let now: () -> Date
+    let cooldown: ServerCooldown
     private var timing: [String: PollTiming] = [:]
-    private var serverTiming: [String: PollTiming] = [:]
-    private var serverUntil: [String: Double]
     private struct Waiting {
         let presenting: Bool
         let completion: (PollOutcome) -> Void
     }
     private var callbacks: [String: [Waiting]] = [:]
-    private var lastOutcome: [String: PollOutcome] = [:]
 
     init(defaults: UserDefaults?, now: @escaping () -> Date = Date.init) {
-        self.defaults = defaults
         self.now = now
-        self.serverUntil = defaults?.dictionary(forKey: Self.cooldownKey) as? [String: Double] ?? [:]
+        self.cooldown = ServerCooldown(defaults: defaults, now: now)
+    }
+    init(cooldown: ServerCooldown, now: @escaping () -> Date = Date.init) {
+        self.now = now; self.cooldown = cooldown
     }
 
-    /// True means the caller owns the network request. Otherwise the completion is either queued
-    /// behind the existing request, or answered with the previous result during a cooldown.
-    func begin(_ request: PollRequest, manual: Bool, presenting: Bool = false, completion: @escaping (PollOutcome) -> Void) -> Bool {
+    func begin(_ request: PollRequest, manual: Bool, automaticList: Bool = false, presenting: Bool = false, completion: @escaping (PollOutcome) -> Void) -> Bool {
+        DeliveryHealthMonitor.shared.register(request)
         lock.lock()
         let key = request.subscriptionID.uriRepresentation().absoluteString
         if callbacks[key] != nil {
@@ -54,15 +84,12 @@ final class PollCoordinator {
             lock.unlock()
             return false
         }
-        let server = normalizeBaseUrl(request.baseUrl)
-        let date = now()
-        let limited = (serverUntil[server] ?? 0) > date.timeIntervalSince1970
-        if limited || !(timing[key] ?? PollTiming()).allowsPoll(now: date, manual: manual) {
-            let outcome = limited ? PollOutcome(succeeded: false, newMessages: [], failure: .rateLimited)
-                : lastOutcome[key] ?? PollOutcome(succeeded: true, newMessages: [])
+        let limited = !cooldown.claim(server: request.baseUrl, manual: manual)
+        if limited || (automaticList && !(timing[key] ?? PollTiming()).allowsPoll(now: now(), manual: manual)) {
             lock.unlock()
-            if limited { DeliveryHealthMonitor.shared.record(key: key, failure: .rateLimited) }
-            completion(outcome)
+            // A skipped request is neither success/new data nor another failed attempt.
+            if limited { DeliveryHealthMonitor.shared.record(key: key, failure: .rateLimited, attempted: false) }
+            completion(PollOutcome(succeeded: false, newMessages: [], failure: limited ? .rateLimited : nil, attempted: false))
             return false
         }
         callbacks[key] = [Waiting(presenting: presenting, completion: completion)]
@@ -73,31 +100,11 @@ final class PollCoordinator {
     func finish(_ request: PollRequest, outcome: PollOutcome, retryAfter: String?) {
         lock.lock()
         let key = request.subscriptionID.uriRepresentation().absoluteString
-        let server = normalizeBaseUrl(request.baseUrl)
-        let date = now()
-        let previousCooldowns = serverUntil
-        var topicTiming = timing[key] ?? PollTiming()
-        topicTiming.record(failure: outcome.failure, retryAfter: retryAfter, now: date)
-        timing[key] = topicTiming
-        if outcome.failure == .rateLimited {
-            if (serverUntil[server] ?? 0) <= date.timeIntervalSince1970 {
-                var policy = serverTiming[server] ?? PollTiming()
-                policy.record(failure: .rateLimited, retryAfter: retryAfter, now: date)
-                serverTiming[server] = policy
-                serverUntil[server] = policy.nextAllowed.timeIntervalSince1970
-            } else if let delay = PollTiming.retryDelay(retryAfter, now: date) {
-                // Several requests already in flight can receive 429 together. They are one
-                // failed burst, not successive retries; only a later retry doubles the delay.
-                serverUntil[server] = max(serverUntil[server] ?? 0, date.addingTimeInterval(delay).timeIntervalSince1970)
-            }
-        } else if outcome.succeeded, (serverUntil[server] ?? 0) <= date.timeIntervalSince1970 {
-            serverTiming.removeValue(forKey: server)
-            serverUntil.removeValue(forKey: server)
-        }
-        serverUntil = serverUntil.filter { $0.value > date.timeIntervalSince1970 }
-        if previousCooldowns != serverUntil { defaults?.set(serverUntil, forKey: Self.cooldownKey) }
-        // A deferred caller must never replay already-ingested messages to background presentation.
-        lastOutcome[key] = PollOutcome(succeeded: outcome.succeeded, newMessages: [], failure: outcome.failure)
+        var policy = timing[key] ?? PollTiming()
+        policy.record(failure: outcome.failure, retryAfter: retryAfter, now: now())
+        timing[key] = policy
+        if outcome.failure == .rateLimited { cooldown.limit(server: request.baseUrl, retryAfter: retryAfter) }
+        else if outcome.succeeded { cooldown.succeeded(server: request.baseUrl) }
         let waiting = callbacks.removeValue(forKey: key) ?? []
         lock.unlock()
         DeliveryHealthMonitor.shared.record(key: key, failure: outcome.failure)
@@ -105,9 +112,7 @@ final class PollCoordinator {
         for waiter in waiting {
             var result = outcome
             if waiter.presenting {
-                if presentationClaimed {
-                    result = PollOutcome(succeeded: outcome.succeeded, newMessages: [], failure: outcome.failure)
-                }
+                if presentationClaimed { result = PollOutcome(succeeded: outcome.succeeded, newMessages: [], failure: outcome.failure) }
                 presentationClaimed = true
             }
             waiter.completion(result)

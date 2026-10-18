@@ -8,7 +8,7 @@ struct SubscriptionManager {
     var reconciler: FcmSubscriptionReconciler = .shared
     var polling: PollCoordinator = .shared
     /// The network call behind a poll; a seam so tests can answer without a server.
-    var fetch: (PollRequest, @escaping ([Message]?, Error?) -> Void) -> Void = { ApiService.shared.poll($0, completionHandler: $1) }
+    var fetch: (PollRequest, @escaping ([Message]?, Error?) -> Void) -> Void = { ApiService.shared.poll($0, timeout: 10, completionHandler: $1) }
 
     /// A hashed upstream topic is public and forgeable. Its payload is only a wake hint: never
     /// ingest it, including its base_url, sequence_id or event ID. Poll snapshots of our own
@@ -116,9 +116,9 @@ struct SubscriptionManager {
     /// meantime the response is dropped.
     ///
     /// The live loop skips an overlapping tick; explicit refresh joins an existing request and
-    /// waits for its result. All polls respect ordinary cooldowns unless manual, and every caller
-    /// respects server rate limits. Saves still de-duplicate by ID and never move cursors backward.
-    func pollWithOutcome(_ subscription: Subscription, skipIfInFlight: Bool = false, manual: Bool = false, presenting: Bool = false, completionHandler: @escaping (PollOutcome) -> Void) {
+    /// waits for its result. Only automatic list polls use the minimum interval; every caller
+    /// respects server rate limits, with one manual probe per minute. Saves still de-duplicate by ID and never move cursors backward.
+    func pollWithOutcome(_ subscription: Subscription, skipIfInFlight: Bool = false, manual: Bool = false, automaticList: Bool = false, presenting: Bool = false, completionHandler: @escaping (PollOutcome) -> Void) {
         guard let request = store.pollRequest(for: subscription) else {
             Log.d(tag, "Attempting to poll dead subscription failed")
             completionHandler(PollOutcome(succeeded: false, newMessages: []))
@@ -127,12 +127,12 @@ struct SubscriptionManager {
         if skipIfInFlight {
             guard PollGuard.shared.begin(key: request.topicUrl) else {
                 Log.d(tag, "Skipping live poll of \(request.topicUrl): one is already in flight")
-                completionHandler(PollOutcome(succeeded: true, newMessages: []))
+                completionHandler(PollOutcome(succeeded: false, newMessages: [], attempted: false))
                 return
             }
         }
         let release = { if skipIfInFlight { PollGuard.shared.end(key: request.topicUrl) } }
-        guard polling.begin(request, manual: manual, presenting: presenting, completion: { outcome in
+        guard polling.begin(request, manual: manual, automaticList: automaticList, presenting: presenting, completion: { outcome in
             release()
             completionHandler(outcome)
         }) else { return }
@@ -161,14 +161,35 @@ struct SubscriptionManager {
     func pollAll(_ subscriptions: [Subscription], manual: Bool, completion: @escaping () -> Void) {
         let launch = {
             guard !subscriptions.isEmpty else { completion(); return }
+            // Round robin across servers so a large dead server cannot hold healthy ones behind it.
+            var groups = Dictionary(grouping: subscriptions, by: { normalizeBaseUrl($0.baseUrl ?? "") })
+            let servers = groups.keys.sorted()
+            var ordered: [Subscription] = []
+            while !groups.isEmpty {
+                for server in servers {
+                    if var group = groups[server], !group.isEmpty {
+                        ordered.append(group.removeFirst())
+                        groups[server] = group.isEmpty ? nil : group
+                    }
+                }
+            }
+            var failedServers: Set<String> = []
             var next = 0
-            var remaining = subscriptions.count
+            var remaining = ordered.count
             func startNext() {
-                guard next < subscriptions.count else { return }
-                let subscription = subscriptions[next]
+                guard next < ordered.count else { return }
+                let subscription = ordered[next]
+                let server = normalizeBaseUrl(subscription.baseUrl ?? "")
                 next += 1
-                pollWithOutcome(subscription, manual: manual) { _ in
+                if failedServers.contains(server) {
+                    DeliveryHealthMonitor.shared.record(key: subscription.objectID.uriRepresentation().absoluteString, failure: .unreachable, attempted: false)
+                    remaining -= 1
+                    if remaining == 0 { completion() } else { startNext() }
+                    return
+                }
+                pollWithOutcome(subscription, manual: manual, automaticList: !manual) { outcome in
                     DispatchQueue.main.async {
+                        if outcome.failure == .unreachable { failedServers.insert(server) }
                         remaining -= 1
                         if remaining == 0 { completion() } else { startNext() }
                     }
@@ -193,6 +214,7 @@ struct PollOutcome {
     let succeeded: Bool
     let newMessages: [Message]
     var failure: PollFailure? = nil
+    var attempted = true
 }
 
 /// At most one live-loop poll in flight per topic. Without it the open topic's ten-second timer
@@ -220,6 +242,11 @@ final class PollGuard {
 enum LivePollSchedule {
     static let interval: TimeInterval = 10
     static let maxInterval: TimeInterval = 300
+
+    static func failures(after outcome: PollOutcome, previous: Int) -> Int {
+        guard outcome.attempted else { return previous }
+        return outcome.succeeded ? 0 : previous + 1
+    }
 
     static func delay(afterConsecutiveFailures failures: Int) -> TimeInterval {
         let exponent = Double(min(max(failures, 0), 16))
