@@ -23,6 +23,7 @@ struct NotificationListView: View {
     // in #36; this is its sibling.
     @StateObject var notificationsModel: NotificationsObservable
     
+    @State private var searchText = ""
     @State private var editMode = EditMode.inactive
     @State private var selection = Set<Notification>()
     
@@ -48,6 +49,11 @@ struct NotificationListView: View {
 
     var body: some View {
         notificationList
+            .searchable(text: $searchText, prompt: NotificationHistoryStrings.search)
+            .onChange(of: searchText) { value in
+                selection = []
+                notificationsModel.search(value)
+            }
             .refreshable {
                 _ = await pollOnce()
             }
@@ -260,7 +266,9 @@ struct NotificationListView: View {
         // The empty state is a row of the list, not an overlay on top of it. As an overlay it sat over
         // the (empty) list and swallowed the drag, so pull-to-refresh did nothing on a new topic, and on
         // a small phone its text ran off the screen with no way to scroll to the copy buttons.
-        if notificationsModel.notifications.isEmpty && editMode == .inactive, let baseUrl = subscription.baseUrl {
+        if notificationsModel.notifications.isEmpty && !searchText.isEmpty {
+            Text(NotificationHistoryStrings.noMatches).foregroundColor(.secondary)
+        } else if notificationsModel.notifications.isEmpty && editMode == .inactive, let baseUrl = subscription.baseUrl {
             TopicPublishHelpView(
                 baseUrl: baseUrl,
                 topic: subscription.topicName(),
@@ -277,6 +285,9 @@ struct NotificationListView: View {
                 notification: notification,
                 onCopyMessage: showCopyConfirmation
             )
+        }
+        if notificationsModel.hasOlder {
+            Button(NotificationHistoryStrings.loadOlder) { notificationsModel.loadOlder() }
         }
     }
     

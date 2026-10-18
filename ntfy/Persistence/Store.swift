@@ -55,7 +55,10 @@ class Store: ObservableObject {
     static let autoDownload50MB = Constants.autoDownload50MB
     private static let sharedDefaults = UserDefaults(suiteName: Store.appGroup)!
     private static let sharedDefaultsKeyCriticalAlertsAuthorized = "criticalAlertsAuthorized"
-    private let container: NSPersistentContainer
+    let container: NSPersistentContainer
+    let retentionContext: NSManagedObjectContext
+    private let historyContext: NSManagedObjectContext
+    private var historyToken: NSPersistentHistoryToken?
     /// Injected so credential and migration behavior can be tested without pretending an unsigned
     /// XCTest host can use the Keychain. Production and the NSE use the real implementation.
     var credentialStore: CredentialStoring
@@ -92,6 +95,7 @@ class Store: ObservableObject {
 
     init(
         inMemory: Bool = false,
+        storeURL: URL? = nil,
         credentialStore: CredentialStoring = KeychainCredentialStore.shared,
         topicSecrets: TopicSecretStoring = KeychainCredentialStore.shared
     ) {
@@ -105,7 +109,7 @@ class Store: ObservableObject {
             for: .applicationSupportDirectory,
             in: .userDomainMask
         ).first ?? fileManager.temporaryDirectory.appendingPathComponent("ntfy-application-support", isDirectory: true)
-        let storeUrl = Store.persistentStoreURL(
+        let storeUrl = storeURL ?? Store.persistentStoreURL(
             inMemory: inMemory,
             appGroupContainerURL: appGroupContainerURL,
             fallbackApplicationSupportURL: fallbackApplicationSupportURL
@@ -123,6 +127,7 @@ class Store: ObservableObject {
         }
         let description = NSPersistentStoreDescription(url: storeUrl)
         description.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
+        description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
         description.shouldMigrateStoreAutomatically = true
         description.shouldInferMappingModelAutomatically = true
 
@@ -138,46 +143,69 @@ class Store: ObservableObject {
             }
         }
         
+        retentionContext = container.newBackgroundContext()
+        retentionContext.transactionAuthor = "ntfy.retention"
+        retentionContext.stalenessInterval = 0
+        historyContext = container.newBackgroundContext()
+        historyToken = container.persistentStoreCoordinator.currentPersistentHistoryToken(fromStores: nil)
+
         // Shortcut for context
         context.automaticallyMergesChangesFromParent = true
         context.mergePolicy = NSMergePolicy(merge: .mergeByPropertyStoreTrumpMergePolicyType) // https://stackoverflow.com/a/60362945/1440785
         context.transactionAuthor = Bundle.main.bundlePath.hasSuffix(".appex") ? "ntfy.appex" : "ntfy"
         
-        // When a remote change comes in (= the app extension updated entities in Core Data),
-        // refresh what the view context already knows about and then tell the observables to
-        // re-run their fetches — see `didChangeRemotely` for why the refresh alone is not enough.
-        NotificationCenter.default
-          .publisher(for: .NSPersistentStoreRemoteChange)
-          // Coalesce bursts. Each extension save emits its own remote-change notification, and every
-          // one of them costs a full refresh plus a re-fetch in each observable, on the main queue —
-          // so twenty pushes landing together would otherwise mean twenty passes over a large
-          // history while the user is looking at it. `throttle` delivers the first immediately (the
-          // common case is a single message, which must feel instant) and then at most one per
-          // window, keeping the latest. Delivery is on main, so the sink body needs no further hop.
-          .throttle(for: .milliseconds(300), scheduler: DispatchQueue.main, latest: true)
-          .sink { value in
-              Log.d(Store.tag, "Remote change detected, refreshing views", value)
-              self.hardRefresh()
-              NotificationCenter.default.post(name: Store.didChangeRemotely, object: nil)
-          }
-          .store(in: &cancellables)
+        if !inMemory {
+            NotificationCenter.default.publisher(for: .NSPersistentStoreRemoteChange,
+                                             object: container.persistentStoreCoordinator)
+                .throttle(for: .milliseconds(300), scheduler: DispatchQueue.main, latest: true)
+                .sink { [weak self] _ in self?.mergeRemoteHistory() }
+                .store(in: &cancellables)
+        }
+        if !inMemory && !Bundle.main.bundlePath.hasSuffix(".appex") {
+            _ = notificationRetention()
+            NotificationCenter.default.publisher(for: .NSManagedObjectContextDidSave, object: context)
+                .debounce(for: .seconds(2), scheduler: DispatchQueue.main)
+                .sink { [weak self] _ in self?.pruneNotifications() }
+                .store(in: &cancellables)
+        }
     }
 
-    /// Broadcast after the app has absorbed a write made by the notification service extension's
-    /// process.
-    ///
-    /// `hardRefresh()` on its own is not enough, which is why a push arriving while the app was
-    /// open used to leave the screen stale: `refreshAllObjects()` re-faults only objects the view
-    /// context has already registered, and a row inserted by the *extension's* process was never
-    /// registered here. An `NSFetchedResultsController`'s membership changes only when the context
-    /// it observes processes a save, and a cross-process commit never produces one — so the topic
-    /// list showed no new badge and an open topic showed no new row until the user navigated away
-    /// and back or pulled to refresh.
-    ///
-    /// Observables re-run `performFetch()` when this fires. It is deliberately coarse (every
-    /// observable re-fetches, not just the affected topic): the payload would have to carry the
-    /// changed object ids to do better, and a re-fetch on push arrival is cheap next to the
-    /// notification itself.
+    /// Merge only changed object IDs. Refreshing every registered object and fetching every row
+    /// on each push makes an open topic progressively more expensive as its history grows.
+    /// History is serialised on its own queue; the token only advances after a successful fetch.
+    func mergeRemoteHistory(completion: (() -> Void)? = nil) {
+        let localAuthor = context.transactionAuthor
+        historyContext.perform {
+            do {
+                let request = NSPersistentHistoryChangeRequest.fetchHistory(after: self.historyToken)
+                let result = try self.historyContext.execute(request) as? NSPersistentHistoryResult
+                let transactions = result?.result as? [NSPersistentHistoryTransaction] ?? []
+                if let token = transactions.last?.token { self.historyToken = token }
+                let changes = transactions.filter { $0.author != localAuthor }.compactMap { $0.objectIDNotification().userInfo }
+                self.context.perform {
+                    for change in changes {
+                        NSManagedObjectContext.mergeChanges(fromRemoteContextSave: change, into: [self.context])
+                    }
+                    self.context.processPendingChanges()
+                    NotificationCenter.default.post(name: Store.didChangeRemotely, object: nil)
+                    completion?()
+                }
+            } catch {
+                Log.w(Store.tag, "Cannot merge extension history; resetting visible pages", error)
+                self.historyToken = self.container.persistentStoreCoordinator.currentPersistentHistoryToken(fromStores: nil)
+                self.context.perform {
+                    self.hardRefresh()
+                    NotificationCenter.default.post(name: Store.didResetHistory, object: nil)
+                    NotificationCenter.default.post(name: Store.didChangeRemotely, object: nil)
+                    completion?()
+                }
+            }
+        }
+    }
+
+    /// A bounded page refresh after history-token recovery.
+    static let didResetHistory = Foundation.Notification.Name("ntfy.storeDidResetHistory")
+    /// Posted after extension history has been merged, so topic summaries can be invalidated.
     static let didChangeRemotely = Foundation.Notification.Name("ntfy.storeDidChangeRemotely")
 
     /// Posted when the topic sort preference changes. Deliberately distinct from
@@ -397,9 +425,12 @@ class Store: ObservableObject {
             let request = Notification.fetchRequest()
             request.predicate = NSPredicate(format: "id = %@", notificationID)
             guard let notification = try? context.fetch(request).first else {
+                // A manual delete/expiry can finish while the network request is still running.
+                try? FileManager.default.removeItem(atPath: localPath)
                 return
             }
 
+            notification.storedAt = Date()
             notification.attachmentLocalPath = localPath
             notification.attachmentProgress = AttachmentProgressState.done.persistedValue
             if resolvedSize > 0 {
@@ -1537,10 +1568,12 @@ class Store: ObservableObject {
     private func saveNotifications(_ ingested: [IngestedMessage], withSubscription subscription: Subscription, polledSince: String? = nil, isPush: Bool = false) throws -> [Message] {
         if isPush { deferredPushID = nil }
         let request = Notification.fetchRequest()
-        request.predicate = NSPredicate(format: "subscription == %@", subscription)
+        let sequences = ingested.map { $0.message.sequence }
+        let ids = ingested.map { $0.message.id }
+        request.predicate = NSPredicate(format: "subscription == %@ AND (sequenceID IN %@ OR id IN %@ OR id IN %@)", subscription, sequences, sequences, ids)
         var rows = try context.fetch(request)
         let stateRequest = NSFetchRequest<NSManagedObject>(entityName: "SequenceState")
-        stateRequest.predicate = NSPredicate(format: "subscription == %@", subscription)
+        stateRequest.predicate = NSPredicate(format: "subscription == %@ AND sequenceID IN %@", subscription, sequences)
         var states: [String: NSManagedObject] = [:]
         for state in try context.fetch(stateRequest) {
             refreshFromStore(state)
@@ -1597,6 +1630,7 @@ class Store: ObservableObject {
             next.setValue(sequence, forKey: "sequenceID")
             next.setValue(message.id, forKey: "eventID")
             next.setValue(message.time, forKey: "time")
+            next.setValue(Date(), forKey: "storedAt")
             next.setValue(message.event, forKey: "event")
             next.setValue((message.time == lastTime ? seen.union([message.id]) : Set([message.id])).sorted().joined(separator: ","), forKey: "seenIDs")
             states[sequence] = next
@@ -1623,7 +1657,6 @@ class Store: ObservableObject {
                 notification.sequenceKey = sequenceKey
                 populate(notification, from: item)
                 notification.subscription = subscription
-                subscription.addToNotifications(notification)
                 if row == nil { rows.append(notification) }
                 presentations.append(message)
             }
@@ -1648,6 +1681,7 @@ class Store: ObservableObject {
 
     private func populate(_ notification: Notification, from item: IngestedMessage) {
         let message = item.message
+        notification.storedAt = Date()
         notification.encryption = item.encryption.rawValue
         notification.ciphertext = item.ciphertext
         notification.jweIV = item.iv
