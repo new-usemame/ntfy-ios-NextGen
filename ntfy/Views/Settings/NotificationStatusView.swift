@@ -138,7 +138,7 @@ struct RelayTopicCheckView: View {
             }
             ApiService.shared.publish(subscription: subscription,
                 user: Store.shared.getBasicUser(baseUrl: subscription.baseUrl ?? ""),
-                message: "This is a wake-up forwarding test from NTFY me.", title: "Wake-up forwarding test",
+                message: Store.testMessagePrefix + " (wake-up forwarding check).", title: "Wake-up forwarding test",
                 encryptionKey: keyState.key,
                 completionHandler: { completion(nil) }, failureHandler: { completion($0.userMessage) })
         }
