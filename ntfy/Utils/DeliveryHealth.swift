@@ -236,18 +236,20 @@ final class ServerCooldown {
             monotonic[name] = uptime() + deadline - date
         }
         generations = until.mapValues { _ in UUID() }
-        // Discard Round 1's unscoped extended gates and immortal non-time polling gates.
-        defaults?.removeObject(forKey: "serverExtensionCooldowns118")
-        defaults?.removeObject(forKey: "serverExtensionChanges118")
-        defaults?.removeObject(forKey: "deliveryHealthServerCooldowns")
-        persist()
+        // Initialization also runs in the NSE. Read and bound old snapshots without writing
+        // them over a newer app refusal; migration is committed by the next actual mutation.
     }
 
     private func active(_ name: String) -> Bool {
         if let deadline = monotonic[name] { return deadline > uptime() }
         return (until[name] ?? 0) > now().timeIntervalSince1970
     }
-    private func persist() { defaults?.set(until, forKey: key); defaults?.set(changes, forKey: changeKey); defaults?.set(probes, forKey: probeKey) }
+    private func persist() {
+        defaults?.set(until, forKey: key); defaults?.set(changes, forKey: changeKey); defaults?.set(probes, forKey: probeKey)
+        defaults?.removeObject(forKey: "serverExtensionCooldowns118")
+        defaults?.removeObject(forKey: "serverExtensionChanges118")
+        defaults?.removeObject(forKey: "deliveryHealthServerCooldowns")
+    }
 
     /// Discovery must never spend a manual-refresh probe while any budget is paused.
     func isLimited(server: String) -> Bool {

@@ -308,6 +308,7 @@ final class ClearThroughTests: XCTestCase {
     }
 
     func testTopicReadStoresPreflightBeforeClearAndKeepsEarlierMissingMessageUnread() {
+        let timestamp = Int64(Date().timeIntervalSince1970)
         let store = Store.shared
         let sub = store.saveSubscription(baseUrl: base, topic: "test-topic")
         defer { store.delete(subscription: sub); store.clearThrough = nil }
@@ -320,7 +321,7 @@ final class ClearThroughTests: XCTestCase {
         }
         store.topicNotificationRemover = { _, _, _, _ in }
         store.wakePublisher = { _, done in done() }
-        store.save(notificationsFromMessages: [Message(id: "AbCdEf123456", time: 100, event: "message", topic: "test-topic")], withSubscription: sub)
+        store.save(notificationsFromMessages: [Message(id: "AbCdEf123456", time: timestamp, event: "message", topic: "test-topic")], withSubscription: sub)
         let polled = expectation(description: "full poll after immediate local read")
         var preflightDone: ((Data?, URLResponse?, Error?) -> Void)?
         var preflightRequest: URLRequest?
@@ -334,9 +335,11 @@ final class ClearThroughTests: XCTestCase {
         store.setRead(true, forSubscription: sub)
         XCTAssertEqual(store.unreadCount(baseUrl: base, topic: "test-topic"), 0)
         wait(for: [polled], timeout: 2)
-        guard let preflightRequest, let preflightDone else { return }
-        let earlier = Data(String(decoding: event(id: "Missed123456", sequence: "Missed123456"), as: UTF8.self).replacingOccurrences(of: "\"time\":100", with: "\"time\":90").utf8)
-        preflightDone(earlier + event(sequence: "AbCdEf123456"), response(preflightRequest, status: 200), nil)
+        guard let preflightRequest, let preflightDone else { wait(for: [fallback], timeout: 0.1); return }
+        let earlier = Data(String(decoding: event(id: "Missed123456", sequence: "Missed123456"), as: UTF8.self).replacingOccurrences(of: "\"time\":100", with: "\"time\":\(timestamp - 10)").utf8)
+        let boundary = Data(String(decoding: event(sequence: "AbCdEf123456"), as: UTF8.self)
+            .replacingOccurrences(of: "\"time\":100", with: "\"time\":\(timestamp)").utf8)
+        preflightDone(earlier + boundary, response(preflightRequest, status: 200), nil)
         wait(for: [fallback], timeout: 2)
         XCTAssertEqual(store.unreadCount(baseUrl: base, topic: "test-topic"), 1)
     }

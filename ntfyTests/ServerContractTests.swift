@@ -145,6 +145,22 @@ final class ServerContractTests: XCTestCase {
         XCTAssertTrue(relaunched.claim(server: "https://s.invalid", manual: false))
     }
 
+    func testExtensionInitializationCannotOverwriteANewerAppRefusal() {
+        let suite = "startup-race-\(UUID())", date = Date(timeIntervalSince1970: 1_700_000_000)
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let app = ServerCooldown(defaults: defaults, now: { date })
+        app.limit(server: "https://first.invalid", retryAfter: "60", condition: "time", kind: .clear)
+        _ = ServerCooldown(defaults: defaults, now: { date }, uptime: {
+            // A response arrives in the app while the extension reconstructs its own snapshot.
+            app.limit(server: "https://newer.invalid", retryAfter: "72000", condition: "time", kind: .clear)
+            return 10
+        })
+        let relaunched = ServerCooldown(defaults: defaults, now: { date })
+        XCTAssertFalse(relaunched.claim(server: "https://newer.invalid", manual: false, kind: .clear))
+        XCTAssertTrue(relaunched.claim(server: "https://newer.invalid", manual: false, kind: .poll))
+    }
+
     func testSuccessfulClearCannotResetPollBackoffOrEraseAnotherBudgetGate() {
         var date = Date(timeIntervalSince1970: 1_700_000_000)
         let cooldown = ServerCooldown(defaults: nil, now: { date })
