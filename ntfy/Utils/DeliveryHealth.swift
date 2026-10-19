@@ -186,145 +186,149 @@ struct PollTiming {
 }
 
 
-/// One server brake shared by polls and clears. Only deadlines and the last manual probe persist.
-/// Stock deadlines remain capped at one hour; recognized extension resets preserve their full delay.
-/// Explicit probes of non-time refusals are at most once a minute.
+/// Rate-limit gates follow the budget of the refused operation. Polls retain the bounded
+/// 1.17 backoff and manual probe; publish refusals cannot suppress reads or discovery.
 final class ServerCooldown {
     static let shared = ServerCooldown(defaults: UserDefaults(suiteName: Store.appGroup) ?? .standard)
     private let lock = NSLock()
     private let defaults: UserDefaults?
     private let now: () -> Date
-    private let key = "deliveryHealthServerCooldowns"
-    private let probeKey = "deliveryHealthServerProbes"
-    private var until: [String: Double]
-    private var probes: [String: Double]
-    private var failures: [String: Int] = [:]
     private let uptime: () -> TimeInterval
-    private var extended: [String: Double]
+    private let key = "deliveryBudgetCooldowns118r2"
+    private let changeKey = "deliveryBudgetChanges118r2"
+    private let probeKey = "deliveryBudgetProbes118r2"
+    private var until: [String: Double]
     private var monotonic: [String: Double] = [:]
     private var changes: [String: String]
-    private let extendedKey = "serverExtensionCooldowns118"
-    private let changeKey = "serverExtensionChanges118"
-    // No request survives a launch; only the deadlines and manual-probe pacing need persistence.
-    enum Kind: String { case poll, clear, clearThrough, relay, discovery }
-    struct Attempt { fileprivate let generation: UUID?; fileprivate let kind: Kind }
-    private func scope(_ server: String, _ kind: Kind) -> String { server + "|118|" + kind.rawValue }
+    private var probes: [String: Double] = [:]
+    private var failures: [String: Int] = [:]
     private var generations: [String: UUID] = [:]
+
+    enum Kind: String { case poll, clear, clearThrough, action, publish, relay, discovery }
+    struct Attempt { fileprivate let generation: UUID?; fileprivate let kind: Kind }
+    private func scope(_ server: String, _ kind: Kind) -> String {
+        let budget: String
+        switch kind {
+        case .clear, .clearThrough, .action, .publish: budget = "publish"
+        default: budget = kind.rawValue
+        }
+        return normalizeBaseUrl(server) + "|118|" + budget
+    }
 
     init(defaults: UserDefaults?, now: @escaping () -> Date = Date.init,
          uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
-        self.defaults = defaults
-        self.now = now
-        self.uptime = uptime
+        self.defaults = defaults; self.now = now; self.uptime = uptime
         let date = now().timeIntervalSince1970
         until = (defaults?.dictionary(forKey: key) as? [String: Double] ?? [:])
             .filter { $0.value.isFinite && $0.value > date }
-            .mapValues { min($0, date + 3600) }
+            .mapValues { min($0, date + 86400) }
+        // A pre-1.18 stock brake can safely migrate to polling for at most an hour.
+        for (server, deadline) in defaults?.dictionary(forKey: "deliveryHealthServerCooldowns") as? [String: Double] ?? [:] {
+            if deadline.isFinite && deadline > date { until[normalizeBaseUrl(server) + "|118|poll"] = min(deadline, date + 3600) }
+        }
+        for name in Array(until.keys) where name.hasSuffix("|118|poll") { until[name] = min(until[name]!, date + 3600) }
+        changes = [:]
         probes = (defaults?.dictionary(forKey: probeKey) as? [String: Double] ?? [:])
-            .filter { $0.value.isFinite && $0.value > date - 60 }
-            .mapValues { min($0, date) }
-        extended = (defaults?.dictionary(forKey: extendedKey) as? [String: Double] ?? [:])
-            .filter { $0.value.isFinite && $0.value > date && $0.value - date < Double(Int64.max) / 1_000_000_000 }
+            .filter { $0.value.isFinite && $0.value > date - 60 }.mapValues { min($0, date) }
         changes = (defaults?.dictionary(forKey: changeKey) as? [String: String] ?? [:])
-            .filter { ["state-change", "request-change"].contains($0.value) }
-        monotonic = extended.mapValues { uptime() + $0 - date }
-        generations = until.merging(extended) { max($0, $1) }.mapValues { _ in UUID() }
-        for key in changes.keys { generations[key.components(separatedBy: "|118|")[0]] = UUID() }
-        defaults?.set(until, forKey: key)
-        defaults?.set(probes, forKey: probeKey)
+            .filter { ["state-change", "request-change"].contains($0.value) && until[$0.key] != nil }
+        for (name, deadline) in until where !name.hasSuffix("|118|poll") && changes[name] == nil {
+            monotonic[name] = uptime() + deadline - date
+        }
+        generations = until.mapValues { _ in UUID() }
+        // Discard Round 1's unscoped extended gates and immortal non-time polling gates.
+        defaults?.removeObject(forKey: "serverExtensionCooldowns118")
+        defaults?.removeObject(forKey: "serverExtensionChanges118")
+        defaults?.removeObject(forKey: "deliveryHealthServerCooldowns")
+        persist()
+    }
+
+    private func active(_ name: String) -> Bool {
+        if let deadline = monotonic[name] { return deadline > uptime() }
+        return (until[name] ?? 0) > now().timeIntervalSince1970
+    }
+    private func persist() { defaults?.set(until, forKey: key); defaults?.set(changes, forKey: changeKey); defaults?.set(probes, forKey: probeKey) }
+
+    /// Discovery must never spend a manual-refresh probe while any budget is paused.
+    func isLimited(server: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let prefix = normalizeBaseUrl(server) + "|118|"
+        return until.keys.contains { $0.hasPrefix(prefix) && active($0) }
     }
 
     func deadline(for server: String, kind: Kind = .poll) -> Date {
         lock.lock(); defer { lock.unlock() }
-        let key = normalizeBaseUrl(server)
-        if changes[scope(key, kind)] != nil { return .distantFuture }
-        let remaining = max(0, (monotonic[key] ?? 0) - uptime())
-        return max(Date(timeIntervalSince1970: until[key] ?? 0), now().addingTimeInterval(remaining))
+        let name = scope(server, kind)
+        if let deadline = monotonic[name] { return now().addingTimeInterval(max(0, deadline - uptime())) }
+        return Date(timeIntervalSince1970: until[name] ?? 0)
     }
 
     func claim(server: String, manual: Bool, kind: Kind = .poll, consumingProbe: Bool = true) -> Bool {
         claimAttempt(server: server, manual: manual, kind: kind, consumingProbe: consumingProbe) != nil
     }
-
     func claimAttempt(server: String, manual: Bool, kind: Kind = .poll, consumingProbe: Bool = true) -> Attempt? {
         lock.lock(); defer { lock.unlock() }
-        let server = normalizeBaseUrl(server)
-        let date = now().timeIntervalSince1970
-        let extensionWait = (monotonic[server] ?? 0) > uptime()
-        // Explicit user probes may test a changed state/request, paced as in 1.17. Automatic
-        // polling/clearing never resumes on a short timer for a non-time condition.
-        if extensionWait { return nil }
-        if changes[scope(server, kind)] != nil || (until[server] ?? 0) > date {
-            guard manual, date - (probes[server] ?? 0) >= 60 else { return nil }
-            if consumingProbe {
-                probes[server] = date
-                defaults?.set(probes, forKey: probeKey)
-            }
+        let name = scope(server, kind)
+        if active(name) {
+            // Timed publish resets are honored in full. Polls always keep 1.17's manual probe.
+            guard manual, kind == .poll || changes[name] != nil,
+                  now().timeIntervalSince1970 - (probes[name] ?? 0) >= 60 else { return nil }
+            if consumingProbe { probes[name] = now().timeIntervalSince1970; persist() }
         }
-        return Attempt(generation: generations[server], kind: kind)
+        return Attempt(generation: generations[name], kind: kind)
     }
 
     func limit(server: String, retryAfter: String?, condition: String? = nil, kind: Kind = .poll) {
         lock.lock(); defer { lock.unlock() }
-        let server = normalizeBaseUrl(server)
-        let date = now()
-        generations[server] = UUID() // A 429 invalidates older probes even if its deadline is unchanged.
-        if let directive = RetryDirective.parse(condition: condition, retryAfter: retryAfter, now: date) {
+        let name = scope(server, kind), date = now()
+        generations[name] = UUID() // A newer refusal invalidates an older concurrent success.
+        let directive = RetryDirective.parse(condition: condition, retryAfter: retryAfter, now: date)
+        if kind != .poll, let directive {
+            let delay: TimeInterval
             switch directive {
             case .time(let seconds):
-                changes.removeValue(forKey: scope(server, kind))
-                let delay = max(1, seconds)
-                monotonic[server] = max(monotonic[server] ?? 0, uptime() + delay)
-                extended[server] = max(extended[server] ?? 0, date.timeIntervalSince1970 + delay)
-            case .stateChange: changes[scope(server, kind)] = "state-change"
-            case .requestChange: changes[scope(server, kind)] = "request-change"
+                changes.removeValue(forKey: name)
+                // No timer is scheduled for long waits. Bound persisted poison to a day.
+                delay = min(86400, max(1, seconds))
+                monotonic[name] = max(monotonic[name] ?? 0, uptime() + delay)
+            case .stateChange: delay = 86400; changes[name] = "state-change"; monotonic.removeValue(forKey: name)
+            case .requestChange: delay = 86400; changes[name] = "request-change"; monotonic.removeValue(forKey: name)
             }
-            defaults?.set(extended, forKey: extendedKey)
-            defaults?.set(changes, forKey: changeKey)
-            return
+            until[name] = max(until[name] ?? 0, date.timeIntervalSince1970 + delay)
+        } else {
+            // Even a recognized non-time poll refusal recovers on the stock 60s exponential
+            // policy. A supplied timed delay is capped just as in 1.17, including manual probes.
+            if !active(name) { failures[name] = min((failures[name] ?? 0) + 1, 7) }
+            let fallback = min(60 * pow(2, Double(max(0, (failures[name] ?? 1) - 1))), 3600)
+            let delay = max(1, PollTiming.retryDelay(retryAfter, now: date) ?? fallback)
+            until[name] = min(date.timeIntervalSince1970 + 3600,
+                max(until[name] ?? 0, date.timeIntervalSince1970 + delay))
+            changes.removeValue(forKey: name)
+            monotonic.removeValue(forKey: name)
         }
-        let active = (until[server] ?? 0) > date.timeIntervalSince1970
-        // Concurrent failures in the same burst are one attempt, not successive retries.
-        if !active { failures[server] = min((failures[server] ?? 0) + 1, 7) }
-        let fallback = min(60 * pow(2, Double(max(0, (failures[server] ?? 1) - 1))), 3600)
-        let delay = max(1, PollTiming.retryDelay(retryAfter, now: date) ?? fallback)
-        until[server] = min(date.timeIntervalSince1970 + 3600,
-            max(until[server] ?? 0, date.addingTimeInterval(delay).timeIntervalSince1970))
-        until = until.filter { $0.value > date.timeIntervalSince1970 }
-        defaults?.set(until, forKey: key)
+        persist()
     }
 
     func hasNonTimeRefusal(server: String, kind: Kind) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        let server = normalizeBaseUrl(server)
-        return changes[scope(server, kind)] != nil && (until[server] ?? 0) <= now().timeIntervalSince1970
+        let name = scope(server, kind)
+        return active(name) && changes[name] != nil
     }
-
-    /// A new explicit read intent may change an oversized batch. Scheduled retries never call
-    /// this; unrelated GET polls remain useful while a clear requires a different request.
     func requestChanged(server: String, kind: Kind) {
         lock.lock(); defer { lock.unlock() }
-        let key = scope(normalizeBaseUrl(server), kind)
-        if changes[key] == "request-change" {
-            changes.removeValue(forKey: key)
-            defaults?.set(changes, forKey: changeKey)
+        let name = scope(server, kind)
+        if changes[name] == "request-change" {
+            changes.removeValue(forKey: name); until.removeValue(forKey: name); monotonic.removeValue(forKey: name)
+            persist()
         }
     }
-
     func succeeded(server: String, attempt: Attempt) {
         lock.lock(); defer { lock.unlock() }
-        let server = normalizeBaseUrl(server)
-        // Clear only the brake this fetch tested, never a newer concurrent 429 from a poll or clear.
-        guard generations[server] == attempt.generation else { return }
-        until.removeValue(forKey: server)
-        extended.removeValue(forKey: server)
-        monotonic.removeValue(forKey: server)
-        changes.removeValue(forKey: scope(server, attempt.kind))
-        defaults?.set(extended, forKey: extendedKey)
-        defaults?.set(changes, forKey: changeKey)
-        failures.removeValue(forKey: server)
-        generations.removeValue(forKey: server)
-        defaults?.set(until, forKey: key)
+        let name = scope(server, attempt.kind)
+        guard generations[name] == attempt.generation else { return }
+        until.removeValue(forKey: name); monotonic.removeValue(forKey: name); changes.removeValue(forKey: name)
+        failures.removeValue(forKey: name); generations.removeValue(forKey: name)
+        persist()
     }
 }
 

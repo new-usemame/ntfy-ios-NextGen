@@ -53,6 +53,7 @@ final class RelayCheck: ObservableObject {
     private var baselineRead = true
     private var baseline: Int64?
     private var hash = ""
+    private var topicBaseUrl = ""
     private var session: URLSession?
 
     init(relayBaseUrl: String = Config.appBaseUrl,
@@ -107,6 +108,7 @@ final class RelayCheck: ObservableObject {
             state = .failed("An automatic relay check requires HTTPS for both your topic server and the relay. No test message was sent.")
             return
         }
+        topicBaseUrl = baseUrl
         hash = Self.topicHash(baseUrl: baseUrl, topic: topic)
         state = .discovering
         let id = generation
@@ -148,11 +150,19 @@ final class RelayCheck: ObservableObject {
     }
 
     private func publish(id: UUID, using publish: @escaping (@escaping (String?) -> Void) -> Void) {
+        let attempt = cooldown?.claimAttempt(server: topicBaseUrl, manual: true, kind: .publish)
+        guard cooldown == nil || attempt != nil else {
+            state = .failed("Your topic server is pausing publishes after a rate limit. No test message was sent. Try again after its wait or state change.")
+            return
+        }
         publish { [weak self] error in
             DispatchQueue.main.async {
                 guard let self, self.generation == id else { return }
                 if let error { self.state = .failed("The test message could not be confirmed: \(error) No relay result is available.") }
-                else { self.poll(id: id, index: 0) }
+                else {
+                    if let attempt { self.cooldown?.succeeded(server: self.topicBaseUrl, attempt: attempt) }
+                    self.poll(id: id, index: 0)
+                }
             }
         }
     }
