@@ -587,7 +587,11 @@ class Store: ObservableObject {
                 }
                 if !ids.isEmpty { NotificationCenter.default.post(name: Self.didChangeRemotely, object: nil) }
                 if let bulkIntent, let clearThrough {
-                    clearThrough.send(bulkIntent) { [weak self] result in
+                    let poll = PollRequest(subscriptionID: subscription.objectID, baseUrl: bulkIntent.boundary.baseUrl,
+                        topicUrl: topicUrl(baseUrl: bulkIntent.boundary.baseUrl, topic: bulkIntent.boundary.topic), since: nil, user: bulkIntent.boundary.user)
+                    clearThrough.send(bulkIntent, storeMessages: { [weak self] messages in
+                        self?.save(notificationsFromMessages: messages, polledWith: poll) != nil
+                    }) { [weak self] result in
                         switch result {
                         case .fallback: self?.sendActions(clears)
                         case .sent: self?.wakeAfterBulk(bulkIntent.boundary)
@@ -715,7 +719,9 @@ class Store: ObservableObject {
         let request = NSFetchRequest<NSDictionary>(entityName: "Notification")
         request.resultType = .dictionaryResultType
         request.propertiesToFetch = ["id", "sequenceID", "time"]
-        request.predicate = predicate
+        // Include previously read rows too: the server clears every eligible sequence through
+        // the boundary, and all such versions must already be stored and read on this device.
+        request.predicate = NSCompoundPredicate(orPredicateWithSubpredicates: [predicate, NSPredicate(format: "subscription == %@ AND read == YES", subscription)])
         request.fetchLimit = 1001
         guard let rows = try? context.fetch(request), rows.count <= 1000 else { return nil }
         var candidates: [ClearRequest] = []
@@ -727,7 +733,7 @@ class Store: ObservableObject {
             return snapshot
         }
         guard !candidates.isEmpty, known.count == rows.count else { return nil }
-        return ClearThroughIntent(boundary: boundary, candidates: candidates, known: known, healthKey: subscription.objectID.uriRepresentation().absoluteString)
+        return ClearThroughIntent(boundary: boundary, candidates: candidates, known: known)
     }
 
     private func wakeAfterBulk(_ request: ClearRequest) {
