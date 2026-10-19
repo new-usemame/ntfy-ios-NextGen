@@ -86,7 +86,10 @@ struct ActionExecutor {
         let server = cooldownServer(for: request, baseUrl: baseUrl)
         guard let permit = ServerCooldown.shared.claimAttempt(server: server, manual: attempt == 1, kind: .action) else {
             let seconds = max(1, Int(ceil(ServerCooldown.shared.deadline(for: server, kind: .action).timeIntervalSinceNow)))
-            notifyActionResult(action, success: false, detail: "The server is limiting this action. Try again in \(seconds) seconds.")
+            let detail = ServerCooldown.shared.hasNonTimeRefusal(server: server, kind: .action)
+                ? "The server or action request must change before trying again."
+                : "The server is limiting this action. Try again in \(seconds) seconds."
+            notifyActionResult(action, success: false, detail: detail)
             return
         }
         let method = request.httpMethod ?? "POST"

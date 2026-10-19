@@ -292,6 +292,29 @@ final class ServerContractTests: XCTestCase {
         XCTAssertEqual(value, .unsupported)
     }
 
+    func testRelayTestPublishRefusalInstallsOnlyPublishBudgetGate() {
+        ContractURLProtocol.headers = ["Retry-After-Condition": "time", "Retry-After": "72000"]
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [ContractURLProtocol.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        let store = Store(inMemory: true)
+        let topic = store.saveSubscription(baseUrl: "https://publish-refusal.invalid", topic: "topic")
+        let baseUrl = topic.baseUrl!
+        let cooldown = ServerCooldown(defaults: nil)
+        let finished = expectation(description: "publish refused with a daily reset")
+        ApiService().publish(subscription: topic, user: nil, message: "test", title: "test", session: session, cooldown: cooldown,
+            completionHandler: { XCTFail("429 must fail the test publish") }, failureHandler: { error in
+                XCTAssertEqual(error, .http(429))
+                XCTAssertFalse(cooldown.claim(server: baseUrl, manual: true, kind: .publish))
+                XCTAssertFalse(cooldown.claim(server: baseUrl, manual: false, kind: .clear))
+                XCTAssertFalse(cooldown.claim(server: baseUrl, manual: false, kind: .action))
+                XCTAssertTrue(cooldown.claim(server: baseUrl, manual: false, kind: .poll))
+                finished.fulfill()
+            })
+        wait(for: [finished], timeout: 3)
+    }
+
     func testClearReadsConditionFromHTTPResponse() {
         ContractURLProtocol.headers = ["Retry-After-Condition": "time", "Retry-After": "72000"]
         let config = URLSessionConfiguration.ephemeral

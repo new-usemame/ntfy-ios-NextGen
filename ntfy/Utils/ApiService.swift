@@ -124,6 +124,7 @@ class ApiService {
         tags: [String] = [],
         encryptionKey: Data? = nil,
         session: URLSession? = nil,
+        cooldown: ServerCooldown = .shared,
         completionHandler: (() -> Void)? = nil,
         failureHandler: ((PublishError) -> Void)? = nil
     ) {
@@ -142,8 +143,9 @@ class ApiService {
             failureHandler?(error)
             return
         }
+        let baseUrl = subscription.baseUrl ?? ""
         Log.d(tag, "Publishing to \(request.url?.absoluteString ?? "?")\(encryptionKey == nil ? "" : " (end-to-end encrypted)")")
-        runOneShot(request, timeout: 10, baseUrl: subscription.baseUrl ?? "?", session: session) { (data, response, error) in
+        runOneShot(request, timeout: 10, baseUrl: baseUrl, session: session) { (data, response, error) in
             guard error == nil else {
                 Log.e(self.tag, "Error publishing message", error!)
                 failureHandler?(.network(error!.localizedDescription))
@@ -152,6 +154,12 @@ class ApiService {
             guard let httpResponse = response as? HTTPURLResponse,
                   (200..<300).contains(httpResponse.statusCode) else {
                 let status = (response as? HTTPURLResponse)?.statusCode
+                if let http = response as? HTTPURLResponse, http.statusCode == 429,
+                   RetryDirective.parse(condition: http.value(forHTTPHeaderField: "Retry-After-Condition"),
+                                        retryAfter: http.value(forHTTPHeaderField: "Retry-After")) != nil {
+                    cooldown.limit(server: baseUrl, retryAfter: http.value(forHTTPHeaderField: "Retry-After"),
+                        condition: http.value(forHTTPHeaderField: "Retry-After-Condition"), kind: .publish)
+                }
                 Log.e(self.tag, "Publishing message failed with HTTP status \(status.map { String($0) } ?? "<missing>")")
                 failureHandler?(.http(status))
                 return

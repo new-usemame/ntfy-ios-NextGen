@@ -326,6 +326,7 @@ final class ClearThroughTests: XCTestCase {
         var preflightRequest: URLRequest?
         coordinator = make(preflight: false) { request, done in
             XCTAssertNotEqual(request.httpMethod, "PUT", "newly discovered unread row must never be included in bulk")
+            guard request.httpMethod != "PUT" else { done(self.receipt(), self.response(request, status: 200), nil); return }
             XCTAssertTrue(request.url!.absoluteString.contains("since=all"))
             preflightRequest = request; preflightDone = done; polled.fulfill()
         }
@@ -333,8 +334,9 @@ final class ClearThroughTests: XCTestCase {
         store.setRead(true, forSubscription: sub)
         XCTAssertEqual(store.unreadCount(baseUrl: base, topic: "test-topic"), 0)
         wait(for: [polled], timeout: 2)
+        guard let preflightRequest, let preflightDone else { return }
         let earlier = Data(String(decoding: event(id: "Missed123456", sequence: "Missed123456"), as: UTF8.self).replacingOccurrences(of: "\"time\":100", with: "\"time\":90").utf8)
-        preflightDone?(earlier + event(sequence: "AbCdEf123456"), response(preflightRequest!, status: 200), nil)
+        preflightDone(earlier + event(sequence: "AbCdEf123456"), response(preflightRequest, status: 200), nil)
         wait(for: [fallback], timeout: 2)
         XCTAssertEqual(store.unreadCount(baseUrl: base, topic: "test-topic"), 1)
     }
