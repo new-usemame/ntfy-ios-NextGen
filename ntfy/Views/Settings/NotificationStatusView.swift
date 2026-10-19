@@ -71,8 +71,15 @@ struct NotificationStatusView: View {
 
     private var selfHostedSubscriptions: [Subscription] {
         subscriptions.subscriptions.filter {
-            normalizeBaseUrl($0.baseUrl ?? "") != normalizeBaseUrl(Config.appBaseUrl)
+            Self.offersWakeupCheck(baseUrl: $0.baseUrl ?? "")
         }
+    }
+
+    static func offersWakeupCheck(baseUrl: String) -> Bool {
+        guard RelayCheck.isSecureBase(baseUrl), let hostname = URL(string: baseUrl)?.host?.lowercased() else { return false }
+        let host = hostname.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        let appHost = URL(string: Config.appBaseUrl)?.host?.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        return host != appHost && host != "ntfy-me.com" && host != "ntfy.sh"
     }
 
     private func statusRow(_ title: String, _ value: String) -> some View {

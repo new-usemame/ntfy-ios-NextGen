@@ -204,6 +204,101 @@ final class RelayCheckTests: XCTestCase {
         XCTAssertFalse(message.contains("in 2 minutes"))
     }
 
+    func testWakeupCheckOnlyOffersSecureSelfHostedServers() {
+        for base in ["https://ntfy-me.com", "https://NTFY-ME.com/path", "https://ntfy.sh", "https://NTFY.SH:443", "https://ntfy.sh.", "https://ntfy-me.com.", "http://private.example", "https://user:pass@private.example", "https://private.example?x=1", "not a URL"] {
+            XCTAssertFalse(NotificationStatusView.offersWakeupCheck(baseUrl: base), base)
+        }
+        for base in ["https://private.example/ntfy", "https://192.168.1.2:8443", "https://localhost/ntfy"] {
+            XCTAssertTrue(NotificationStatusView.offersWakeupCheck(baseUrl: base), base)
+        }
+    }
+
+    func testCapabilityDiscoveryIsPublicAndDoesNotSendTopicCredentials() {
+        let cache = ServerCapabilitiesCache(cooldown: ServerCooldown(defaults: nil), transport: { request, done in
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            XCTAssertEqual(request.allHTTPHeaderFields?.count, 1)
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/json")
+            done(Data(), HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil), nil)
+        })
+        cache.discover(baseUrl: "https://private.example", user: BasicUser(username: "private-user", password: "secret")) {
+            XCTAssertEqual($0, .unsupported)
+        }
+    }
+
+    func testDiscoverySkipsEveryActiveBudgetWithoutSpendingManualRefreshProbe() {
+        for kind: ServerCooldown.Kind in [.poll, .clear, .clearThrough, .relay, .discovery] {
+            let cooldown = ServerCooldown(defaults: nil)
+            let base = "https://limited.example"
+            cooldown.limit(server: base, retryAfter: "600", kind: kind)
+            let cache = ServerCapabilitiesCache(cooldown: cooldown, transport: { _, _ in
+                XCTFail("Discovery must not spend a request while any rate-limit gate is active")
+            })
+            cache.discover(baseUrl: base) { XCTAssertEqual($0, .unsupported) }
+            XCTAssertTrue(cooldown.claim(server: base, manual: true), "Discovery must preserve the user's refresh probe")
+        }
+    }
+
+    func testDiscoveryGateIsNotCachedAsUnsupportedAfterGateExpires() {
+        var date = Date(timeIntervalSince1970: 1_700_000_000)
+        var uptime: TimeInterval = 0
+        let cooldown = ServerCooldown(defaults: nil, now: { date }, uptime: { uptime })
+        let base = "https://limited.example"
+        cooldown.limit(server: base, retryAfter: "60", kind: .clear)
+        var calls = 0
+        let cache = ServerCapabilitiesCache(cooldown: cooldown, now: { uptime }, transport: { request, done in
+            calls += 1
+            let json = "{\"version\":1,\"relay_check\":1,\"relay_window_seconds\":120}"
+            done(Data(json.utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]), nil)
+        })
+        cache.discover(baseUrl: base) { XCTAssertEqual($0, .unsupported) }
+        XCTAssertEqual(calls, 0)
+        date += 60; uptime += 60
+        cache.discover(baseUrl: base) { XCTAssertTrue($0.relayCheck) }
+        XCTAssertEqual(calls, 1)
+    }
+
+    func testAuthoritativeNegativeDiscoveryPersistsOneDayAcrossRelaunch() throws {
+        let suite = "RelayCheckTests.capabilities.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var clock: TimeInterval = 1_700_000_000
+        var calls = 0
+        func cache() -> ServerCapabilitiesCache {
+            ServerCapabilitiesCache(cooldown: ServerCooldown(defaults: nil), now: { clock }, defaults: defaults,
+                wallTime: { clock }, transport: { request, done in
+                    calls += 1
+                    done(Data(), HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil), nil)
+                })
+        }
+        cache().discover(baseUrl: "https://stock.example") { XCTAssertEqual($0, .unsupported) }
+        clock += 86399
+        cache().discover(baseUrl: "https://stock.example") { XCTAssertEqual($0, .unsupported) }
+        XCTAssertEqual(calls, 1)
+        clock += 1
+        cache().discover(baseUrl: "https://stock.example") { XCTAssertEqual($0, .unsupported) }
+        XCTAssertEqual(calls, 2)
+    }
+
+    func testTransientDiscoveryFailuresAreRetriedInsteadOfCachingServerFact() {
+        for status in [0, 401, 429, 503] {
+            var calls = 0
+            var clock: TimeInterval = 0
+            var date = Date(timeIntervalSince1970: 1_700_000_000)
+            let cooldown = ServerCooldown(defaults: nil, now: { date }, uptime: { clock })
+            let cache = ServerCapabilitiesCache(cooldown: cooldown, now: { clock }, transport: { request, done in
+                calls += 1
+                if status == 0 { done(nil, nil, URLError(.notConnectedToInternet)); return }
+                done(Data(), HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil,
+                    headerFields: ["Retry-After": "1"]), nil)
+            })
+            cache.discover(baseUrl: "https://transient.example") { XCTAssertEqual($0, .unsupported) }
+            clock += 1; date += 1
+            cache.discover(baseUrl: "https://transient.example") { XCTAssertEqual($0, .unsupported) }
+            XCTAssertEqual(calls, 2, "HTTP \(status) is not an authoritative unsupported result")
+        }
+    }
+
     /// Opt-in native UIKit/SwiftUI rendering evidence. These are presentation fixtures, separate
     /// from the native-server integration, and never claim a live delivery outcome.
     func testCaptureRelayResultStatesOnSimulator() throws {

@@ -43,7 +43,7 @@ final class ServerExtensionTransport: NSObject, URLSessionTaskDelegate {
 }
 
 final class ServerCapabilitiesCache {
-    static let shared = ServerCapabilitiesCache()
+    static let shared = ServerCapabilitiesCache(defaults: UserDefaults(suiteName: Store.appGroup) ?? .standard)
     typealias Transport = (URLRequest, @escaping (Data?, URLResponse?, Error?) -> Void) -> Void
     private struct Entry { let value: ServerCapabilities; let expires: TimeInterval }
     private let lock = NSLock()
@@ -52,24 +52,37 @@ final class ServerCapabilitiesCache {
     private var generations: [String: UUID] = [:]
     private let now: () -> TimeInterval
     private let transport: Transport
-    private let api: ApiService
     private let cooldown: ServerCooldown
     private let allowInsecureLoopback: Bool
+    private let defaults: UserDefaults?
+    private let wallTime: () -> TimeInterval
+    private static let negativeKey = "serverCapabilitiesUnsupported118"
+    private var negatives: [String: TimeInterval]
 
-    init(api: ApiService = .shared, cooldown: ServerCooldown = .shared, allowInsecureLoopback: Bool = false, now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+    init(cooldown: ServerCooldown = .shared, allowInsecureLoopback: Bool = false, now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         defaults: UserDefaults? = nil, wallTime: @escaping () -> TimeInterval = { Date().timeIntervalSince1970 },
          transport: @escaping Transport = { ServerExtensionTransport.shared.send($0, completion: $1) }) {
-        self.api = api; self.cooldown = cooldown; self.allowInsecureLoopback = allowInsecureLoopback; self.now = now; self.transport = transport
+        self.cooldown = cooldown; self.allowInsecureLoopback = allowInsecureLoopback; self.now = now; self.transport = transport
+        self.defaults = defaults; self.wallTime = wallTime
+        negatives = (defaults?.dictionary(forKey: Self.negativeKey) as? [String: TimeInterval] ?? [:])
+            .filter { $0.value.isFinite && $0.value > wallTime() }
+            .mapValues { min($0, wallTime() + 86400) }
     }
 
     func invalidate(baseUrl: String) {
         lock.lock(); defer { lock.unlock() }
         entries.removeValue(forKey: baseUrl)
+        negatives.removeValue(forKey: baseUrl)
+        defaults?.set(negatives, forKey: Self.negativeKey)
         generations[baseUrl] = UUID()
     }
 
     func discover(baseUrl: String, user: BasicUser? = nil, completion: @escaping (ServerCapabilities) -> Void) {
         lock.lock()
         let instant = now()
+        if negatives[baseUrl].map({ $0 > wallTime() }) == true {
+            lock.unlock(); completion(.unsupported); return
+        }
         if let entry = entries[baseUrl], entry.expires > instant {
             lock.unlock(); completion(entry.value); return
         }
@@ -83,10 +96,11 @@ final class ServerCapabilitiesCache {
         guard let url = URL(string: "\(baseUrl)/v1/ntfyme/capabilities"),
               url.scheme?.lowercased() == "https" || (allowInsecureLoopback && url.scheme == "http" && ["127.0.0.1", "::1", "[::1]"].contains(url.host ?? "")),
               url.user == nil, url.password == nil, url.query == nil, url.fragment == nil,
-              let attempt = cooldown.claimAttempt(server: baseUrl, manual: true, kind: .discovery) else {
+              !cooldown.isLimited(server: baseUrl) else {
             finish(baseUrl, generation: generation, value: .unsupported); return
         }
-        var request = api.newRequest(url: url, baseUrl: baseUrl, user: user)
+        // This public endpoint does not require topic credentials, custom headers or a manual probe.
+        var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         transport(request) { data, response, error in
@@ -97,19 +111,28 @@ final class ServerCapabilitiesCache {
             }
             let valid = error == nil && http?.statusCode == 200 && http?.url == url
                 && http?.mimeType?.lowercased() == "application/json"
-            if valid { self.cooldown.succeeded(server: baseUrl, attempt: attempt) }
             let value = valid ? data.map(ServerCapabilities.decode) ?? .unsupported : .unsupported
-            self.finish(baseUrl, generation: generation, value: value)
+            let authoritative = error == nil && http?.url == url
+                && (http?.statusCode == 404 || http?.statusCode == 405 || valid)
+            self.finish(baseUrl, generation: generation, value: value, cache: authoritative)
         }
     }
 
-    private func finish(_ server: String, generation: UUID, value: ServerCapabilities) {
+    private func finish(_ server: String, generation: UUID, value: ServerCapabilities, cache: Bool = false) {
         lock.lock()
         let callbacks = waiting.removeValue(forKey: server) ?? []
         let valid = generations[server] == generation
         entries = entries.filter { $0.value.expires > now() }
         if entries.count >= 64, let oldest = entries.min(by: { $0.value.expires < $1.value.expires })?.key { entries.removeValue(forKey: oldest) }
-        if valid { entries[server] = Entry(value: value, expires: now() + 300) }
+        if valid && cache {
+            if value == .unsupported {
+                negatives = negatives.filter { $0.value > wallTime() }
+                negatives[server] = wallTime() + 86400
+                defaults?.set(negatives, forKey: Self.negativeKey)
+            } else {
+                entries[server] = Entry(value: value, expires: now() + 300)
+            }
+        }
         generations.removeValue(forKey: server)
         lock.unlock()
         callbacks.forEach { $0(valid ? value : .unsupported) }
