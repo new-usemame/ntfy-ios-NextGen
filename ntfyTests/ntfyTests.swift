@@ -471,7 +471,8 @@ final class ntfyTests: XCTestCase {
         // Reading what another app left on the pasteboard asks for paste permission and stalls the run, so start empty.
         UIPasteboard.general.items = []
         addTeardownBlock { UIPasteboard.general.items = [] }
-        var action = Action(id: "copy", action: "copy", label: "Copy code",
+        // Each invocation is a new action, including same-process test repetitions.
+        var action = Action(id: "copy-\(UUID().uuidString)", action: "copy", label: "Copy code",
                             url: nil, method: nil, headers: nil, body: nil, clear: nil)
         action.value = "ABC-123"
         ActionExecutor.execute(action)
@@ -1324,8 +1325,8 @@ final class ntfyTests: XCTestCase {
         return sub
     }
 
-    // CI has exceeded four seconds before delivering a main-queue wake completion.
-    // This is a scheduling watchdog, not an app response-time assertion; poll clocks are isolated.
+    // Hosted CI's two-second wake wait failed in a test lasting 4.6 seconds.
+    // This is a scheduling watchdog, not an app response-time assertion; poll state is isolated.
     private let silentWakeWatchdog: TimeInterval = 15
 
     private func silentWakeStore() -> Store {
