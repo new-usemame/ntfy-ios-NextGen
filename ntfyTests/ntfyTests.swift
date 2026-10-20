@@ -7871,8 +7871,10 @@ final class Base64MessageTests: XCTestCase {
         XCTAssertEqual(try wire("U0dWc2JHOD0=").message, "SGVsbG8=")
     }
 
-    func testBinaryControlCharactersDoNotRenderAsText() throws {
-        XCTAssertEqual(try wire(Data([0, 1, 2, 27, 127]).base64EncodedString()).message, binaryExplanation)
+    func testValidUTF8ControlTextIsPreservedWithoutContentHeuristics() throws {
+        // UTF-8 validity is the contract; control scalars are not evidence of invalid bytes.
+        let text = String(decoding: [0, 1, 2, 27, 127, 0xc2, 0x85], as: UTF8.self)
+        XCTAssertEqual(try wire(Data(text.utf8).base64EncodedString()).message, text)
     }
 
     func testDirectPushDecodesAndNormalizedUserInfoNeverDecodesTwice() throws {

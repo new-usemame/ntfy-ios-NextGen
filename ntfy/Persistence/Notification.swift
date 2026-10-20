@@ -454,10 +454,7 @@ struct Message: Decodable {
         guard let data = Data(base64Encoded: encoded) else {
             return "This message could not be decoded (invalid base64)."
         }
-        guard let text = String(data: data, encoding: .utf8),
-              !text.unicodeScalars.contains(where: {
-                  ($0.value < 32 || (127...159).contains($0.value)) && $0 != "\n" && $0 != "\r" && $0 != "\t"
-              }) else {
+        guard let text = String(data: data, encoding: .utf8) else {
             return "This message contains binary data and cannot be displayed as text."
         }
         return text
