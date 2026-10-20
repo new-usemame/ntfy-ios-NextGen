@@ -8,7 +8,7 @@ import Security
 final class InMemoryCredentialStore: CredentialStoring {
     var failWrites = false
     var passwordWrites: [String?] = []
-    private var passwords: [String: String] = [:]
+    private var passwords: [String: ServerCredential] = [:]
     private var headers: [String: [String: String]] = [:]
     private var deleteRequests: [String] = []
     private var headerReadsFail = false
@@ -25,21 +25,38 @@ final class InMemoryCredentialStore: CredentialStoring {
             passwords.removeValue(forKey: baseUrl)
             return true
         }
-        passwords[baseUrl] = password
+        passwords[baseUrl] = .basic(username: "", password: password)
         return true
     }
 
     func password(baseUrl: String) -> String? {
         lock.lock()
         defer { lock.unlock() }
-        return passwords[baseUrl]
+        return passwords[baseUrl].flatMap { if case .basic(_, let password) = $0 { return password }; return nil }
     }
 
     func readPassword(baseUrl: String) -> TopicSecretRead<String> {
         lock.lock()
         defer { lock.unlock() }
         if passwordReadsFail { return .failed(errSecInteractionNotAllowed) }
-        return passwords[baseUrl].map { .found($0) } ?? .notFound
+        return passwords[baseUrl].flatMap { if case .basic(_, let password) = $0 { return .found(password) }; return nil } ?? .notFound
+    }
+
+    func readCredential(baseUrl: String, username: String) -> TopicSecretRead<ServerCredential> {
+        lock.lock()
+        defer { lock.unlock() }
+        if passwordReadsFail { return .failed(errSecInteractionNotAllowed) }
+        guard let value = passwords[baseUrl] else { return .notFound }
+        if case .basic(_, let password) = value { return .found(.basic(username: username, password: password)) }
+        return .found(value)
+    }
+
+    func setCredential(_ credential: ServerCredential, baseUrl: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !failWrites else { return false }
+        passwords[baseUrl] = credential
+        return true
     }
 
     func setPasswordReadsFail(_ fail: Bool) {
@@ -7928,5 +7945,153 @@ final class Base64MessageTests: XCTestCase {
         content.userInfo = info
         content.body = info["message"] as! String
         XCTAssertEqual(UNNotificationContent.encryptionSafeFallback(content).body, TopicEncryption.lockedPlaceholder)
+    }
+}
+
+extension ntfyTests {
+    func testAccessTokenUsesBearerAcrossAPIAndManualAttachmentRequests() throws {
+        let credential = ServerCredential.accessToken("tk_test123")
+        let base = "https://token.example"
+        let api = ApiService(credentialStore: credentialStore)
+        let request = api.newRequest(url: try XCTUnwrap(URL(string: base + "/private/json")), baseUrl: base, user: credential)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer tk_test123")
+        let download = AttachmentFileStore.makeRequest(remoteUrl: try XCTUnwrap(URL(string: base + "/file/a.png")),
+            baseUrl: base, authorizationHeader: credential.toHeader(), credentialStore: credentialStore)
+        XCTAssertEqual(download.value(forHTTPHeaderField: "Authorization"), "Bearer tk_test123")
+        let crossOrigin = AttachmentFileStore.makeRequest(remoteUrl: try XCTUnwrap(URL(string: "https://other.example/a.png")),
+            baseUrl: base, authorizationHeader: credential.toHeader(), credentialStore: credentialStore)
+        XCTAssertNil(crossOrigin.value(forHTTPHeaderField: "Authorization"))
+        XCTAssertFalse(String(describing: credential).contains("tk_test123"))
+        XCTAssertFalse(String(reflecting: credential).contains("tk_test123"))
+    }
+
+    func testAccessTokenReachesNSEAttachmentRequest() {
+        setAutoDownloadPolicy(Store.autoDownload100KB)
+        RecordingURLProtocol.reset()
+        let done = expectation(description: "NSE token attachment request")
+        UNMutableNotificationContent().attachImageIfNeeded(
+            message: imageAttachmentMessage(size: 100, url: "https://token.example/file/token-image.png"),
+            baseUrl: "https://token.example", user: .accessToken("tk_nsetest123"),
+            credentialStore: credentialStore, session: recordingSession()) { done.fulfill() }
+        wait(for: [done], timeout: 5)
+        XCTAssertEqual(RecordingURLProtocol.requests.first?.value(forHTTPHeaderField: "Authorization"), "Bearer tk_nsetest123")
+    }
+
+    func testTypedCredentialCodecPreservesRaw118PasswordIncludingJSON() throws {
+        for password in ["pássword 🔑", "", #"{"accessToken":{"_0":"tk_not-a-token-account"}}"#] {
+            let raw118Data = Data(password.utf8)
+            XCTAssertFalse(ServerCredentialCodec.isTyped(raw118Data))
+            let migrated = try XCTUnwrap(ServerCredentialCodec.decode(raw118Data, legacyUsername: "existing"))
+            XCTAssertEqual(migrated, .basic(username: "existing", password: password))
+            let envelope = try ServerCredentialCodec.encode(migrated)
+            XCTAssertTrue(ServerCredentialCodec.isTyped(envelope))
+            XCTAssertEqual(ServerCredentialCodec.decode(envelope, legacyUsername: "ignored"), migrated)
+        }
+        XCTAssertNil(ServerCredentialCodec.decode(Data([0xff, 0xfe]), legacyUsername: "existing"))
+        var corrupt = try ServerCredentialCodec.encode(.accessToken("tk_codec123"))
+        corrupt.removeLast()
+        XCTAssertNil(ServerCredentialCodec.decode(corrupt, legacyUsername: "existing"))
+    }
+
+    func testTokenAccountRoundTripReplacementAndDeletionKeepSecretsOutOfCoreData() throws {
+        let base = "https://token-roundtrip-\(UUID().uuidString).example"
+        XCTAssertTrue(Store.shared.saveUser(baseUrl: base, credential: .accessToken("tk_original123")))
+        let user = try XCTUnwrap(Store.shared.getUser(baseUrl: base))
+        XCTAssertEqual(user.username, "")
+        XCTAssertEqual(user.password, "")
+        XCTAssertEqual(Store.shared.getBasicUser(baseUrl: base), .accessToken("tk_original123"))
+        XCTAssertTrue(Store.shared.saveUser(baseUrl: base, credential: .basic(username: "password-user", password: "pw")))
+        XCTAssertEqual(Store.shared.getBasicUser(baseUrl: base), .basic(username: "password-user", password: "pw"))
+        XCTAssertTrue(Store.shared.saveUser(baseUrl: base, credential: .accessToken("tk_replacement123")))
+        Store.shared.delete(user: user)
+        XCTAssertEqual(credentialStore.readCredential(baseUrl: base, username: ""), .notFound)
+    }
+
+    func testFailedTokenReplacementPreservesOldLoginAndCoreData() throws {
+        let base = "https://token-failure-\(UUID().uuidString).example"
+        XCTAssertTrue(Store.shared.saveUser(baseUrl: base, username: "old", password: "original"))
+        let user = try XCTUnwrap(Store.shared.getUser(baseUrl: base))
+        deleteAfterTest(user)
+        credentialStore.failWrites = true
+        XCTAssertFalse(Store.shared.saveUser(baseUrl: base, credential: .accessToken("tk_replacement123")))
+        credentialStore.failWrites = false
+        XCTAssertEqual(user.username, "old")
+        XCTAssertEqual(Store.shared.getBasicUser(baseUrl: base), .basic(username: "old", password: "original"))
+        credentialStore.setPasswordReadsFail(true)
+        XCTAssertFalse(Store.shared.saveUser(baseUrl: base, credential: .accessToken("tk_replacement123")))
+        credentialStore.setPasswordReadsFail(false)
+        XCTAssertEqual(Store.shared.getBasicUser(baseUrl: base), .basic(username: "old", password: "original"))
+    }
+
+    func testLoginInputRequiresTokenWithoutUsernameAndExplicitSecretWhenSwitchingMethods() {
+        var input = ServerLoginInput(method: .token, username: "", secret: "tk_valid123")
+        XCTAssertTrue(input.isValid)
+        XCTAssertEqual(input.credential, .accessToken("tk_valid123"))
+        for invalid in ["", "tk_", "tk_bad token", "tk_bad\r\nInjected: yes", "Bearer tk_value"] {
+            input.secret = invalid
+            XCTAssertFalse(input.isValid)
+        }
+        input.secret = ""
+        XCTAssertTrue(input.canSave(isEditing: true, originalMethod: .token))
+        XCTAssertFalse(input.canSave(isEditing: true, originalMethod: .password))
+        input.method = .password
+        input.username = "existing"
+        XCTAssertFalse(input.canSave(isEditing: true, originalMethod: .token))
+        XCTAssertTrue(input.canSave(isEditing: true, originalMethod: .password))
+    }
+
+    func testReal118KeychainBytesRemainUsableAndTypedTokenRoundTrips() throws {
+        let keychain = KeychainCredentialStore.shared
+        guard keychain.isAvailable else { throw XCTSkip("requires signed Keychain host; codec and injected storage run unsigned") }
+        let base = "https://118-migration-\(UUID().uuidString).example"
+        // Exact service, account, accessibility and UTF-8 bytes written by 1.18 setPassword.
+        var rawQuery: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Config.bundleIdBase + ".serverPassword", kSecAttrAccount as String: base,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+            kSecValueData as String: Data("real-1.18-password ✓".utf8)]
+        rawQuery[kSecAttrAccessGroup as String] = KeychainCredentialStore.accessGroup
+        var addStatus = SecItemAdd(rawQuery as CFDictionary, nil)
+        if addStatus == errSecMissingEntitlement {
+            rawQuery.removeValue(forKey: kSecAttrAccessGroup as String)
+            addStatus = SecItemAdd(rawQuery as CFDictionary, nil)
+        }
+        XCTAssertEqual(addStatus, errSecSuccess)
+        defer { keychain.deletePassword(baseUrl: base) }
+        XCTAssertEqual(keychain.readCredential(baseUrl: base, username: "upgraded"),
+                       .found(.basic(username: "upgraded", password: "real-1.18-password ✓")))
+        let upgradedStore = Store(inMemory: true, credentialStore: keychain)
+        let legacyUser = User(context: upgradedStore.context)
+        legacyUser.baseUrl = base
+        legacyUser.username = "upgraded"
+        legacyUser.password = "" // Exact migrated Core Data row written by 1.18.
+        try upgradedStore.context.save()
+        let resolved = try XCTUnwrap(upgradedStore.getBasicUser(baseUrl: base))
+        XCTAssertEqual(resolved, .basic(username: "upgraded", password: "real-1.18-password ✓"))
+        XCTAssertEqual(ApiService(credentialStore: keychain).newRequest(
+            url: try XCTUnwrap(URL(string: base + "/private/json")), baseUrl: base, user: resolved
+        ).value(forHTTPHeaderField: "Authorization"),
+            "Basic " + Data("upgraded:real-1.18-password ✓".utf8).base64EncodedString())
+        var query = rawQuery
+        query.removeValue(forKey: kSecValueData as String)
+        query.removeValue(forKey: kSecAttrAccessible as String)
+        query[kSecReturnData as String] = true
+        var result: CFTypeRef?
+        XCTAssertEqual(SecItemCopyMatching(query as CFDictionary, &result), errSecSuccess)
+        XCTAssertEqual(try XCTUnwrap(result as? Data), Data("real-1.18-password ✓".utf8),
+                       "a read-only NSE cannot race credential replacement by rewriting legacy data")
+        XCTAssertTrue(keychain.setCredential(.accessToken("tk_real-roundtrip123"), baseUrl: base))
+        XCTAssertEqual(keychain.readCredential(baseUrl: base, username: ""), .found(.accessToken("tk_real-roundtrip123")))
+        XCTAssertNil(keychain.password(baseUrl: base), "a token must not be mistaken for a password")
+        XCTAssertTrue(keychain.deletePassword(baseUrl: base))
+        XCTAssertEqual(keychain.readCredential(baseUrl: base, username: ""), .notFound)
+    }
+}
+
+extension ntfyTests {
+    func testTokenPublishInstructionsUsePlaceholderInsteadOfBasicLoginOrSecret() {
+        let command = PublishCommand.simple(baseUrl: "https://token.example", topic: "private",
+            auth: .init(username: nil, accessToken: true))
+        XCTAssertTrue(command.contains("Authorization: Bearer <token>"))
+        XCTAssertFalse(command.contains("--user"))
     }
 }

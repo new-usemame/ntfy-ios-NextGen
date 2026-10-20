@@ -18,18 +18,19 @@ struct UserEditorView: View {
     @EnvironmentObject private var store: Store
     
     let selectedUser: User?
-    let onSave: (String, String, String?) -> Bool
+    let onSave: (String, String, ServerCredential?) -> Bool
     let onDelete: (User) -> Void
     let onCancel: () -> Void
     
     @State private var baseUrl: String
-    @State private var username: String
-    @State private var password: String
+    @State private var login: ServerLoginInput
+    @State private var originalMethod: ServerLoginMethod = .password
+    @State private var didLoad = false
     @State private var editor = LoginEditorState()
     
     init(
         selectedUser: User?,
-        onSave: @escaping (String, String, String?) -> Bool,
+        onSave: @escaping (String, String, ServerCredential?) -> Bool,
         onDelete: @escaping (User) -> Void,
         onCancel: @escaping () -> Void
     ) {
@@ -38,8 +39,7 @@ struct UserEditorView: View {
         self.onDelete = onDelete
         self.onCancel = onCancel
         _baseUrl = State(initialValue: selectedUser?.baseUrl ?? "")
-        _username = State(initialValue: selectedUser?.username ?? "")
-        _password = State(initialValue: "")
+        _login = State(initialValue: ServerLoginInput(username: selectedUser?.username ?? ""))
     }
     
     var body: some View {
@@ -47,25 +47,18 @@ struct UserEditorView: View {
             Form {
                 Section(
                     footer: isNewUser
-                    ? Text("You can add a user here. All topics for the given server will use this user.")
-                    : Text("Edit the username or password for \(shortUrl(url: baseUrl)) here. This user is used for all topics of this server. Leave the password blank to leave it unchanged.")
+                    ? Text("Choose a password or access token. All topics for this server use the same login.")
+                    : Text("All topics for \(shortUrl(url: baseUrl)) use this login. Leave the secret blank to keep it unchanged. Enter a new secret when changing the sign-in method.")
                 ) {
                     if isNewUser {
                         TextField("Service URL, e.g. https://ntfy.home.io", text: $baseUrl)
                             .disableAutocapitalization()
                             .disableAutocorrection(true)
                     }
-                    // See SubscriptionAddView: without textContentType iOS never offers the
-                    // Passwords AutoFill bar, so every server password has to be typed by hand.
-                    TextField("Username", text: $username)
-                        .textContentType(.username)
-                        .disableAutocapitalization()
-                        .disableAutocorrection(true)
-                    SecureField("Password", text: $password)
-                        .textContentType(.password)
+                    ServerLoginFields(input: $login)
                 }
-                if (!username.isEmpty || !password.isEmpty || !isNewUser),
-                   let notice = UrlSecurityNotice.message(for: baseUrl) {
+                if (!login.username.isEmpty || !login.secret.isEmpty || !isNewUser),
+                   let notice = UrlSecurityNotice.message(for: baseUrl, isAccessToken: login.method == .token) {
                     Text(notice).font(.footnote).foregroundColor(.secondary)
                 }
                 if editor.saveFailed {
@@ -82,6 +75,15 @@ struct UserEditorView: View {
                     editor.finishDelete(confirmed: true, delete: deleteAction)
                 }
             } message: { Text(HardeningCopy.deleteMessage) }
+            .onAppear {
+                guard !didLoad else { return }
+                didLoad = true
+                if let selectedUser,
+                   let credential = store.getBasicUser(baseUrl: selectedUser.baseUrl ?? "") {
+                    originalMethod = credential.isAccessToken ? .token : .password
+                    login.method = originalMethod
+                }
+            }
             .navigationTitle(isNewUser ? "Add user" : "Edit user")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -103,12 +105,11 @@ struct UserEditorView: View {
     }
     
     private func saveAction() {
-        let finalPassword = passwordForUserEdit(
-            enteredPassword: password,
-            storedPassword: selectedUser?.password,
-            isNewUser: isNewUser
+        let enteredSecret = passwordForUserEdit(
+            enteredPassword: login.secret, storedPassword: nil, isNewUser: isNewUser
         )
-        _ = editor.save { onSave(baseUrl, username, finalPassword) }
+        let replacement = enteredSecret.map { _ in login.credential }
+        _ = editor.save { onSave(baseUrl, login.method == .token ? "" : login.username, replacement) }
     }
     
     private func deleteAction() {
@@ -120,15 +121,13 @@ struct UserEditorView: View {
         if isNewUser {
             if baseUrl.range(of: "^https?://.+", options: .regularExpression, range: nil, locale: nil) == nil {
                 return false
-            } else if username.isEmpty || password.isEmpty {
+            } else if !login.isValid {
                 return false
             } else if store.getUser(baseUrl: baseUrl) != nil {
                 return false
             }
-        } else if username.isEmpty {
-            return false
         }
-        return true
+        return login.canSave(isEditing: !isNewUser, originalMethod: originalMethod)
     }
 }
 
@@ -145,8 +144,9 @@ enum HardeningCopy {
 }
 
 enum UrlSecurityNotice {
-    static func message(for baseUrl: String) -> String? {
-        URL(string: baseUrl)?.scheme?.lowercased() == "http" ? HardeningCopy.httpPassword : nil
+    static func message(for baseUrl: String, isAccessToken: Bool = false) -> String? {
+        guard URL(string: baseUrl)?.scheme?.lowercased() == "http" else { return nil }
+        return isAccessToken ? "This server uses HTTP. Your access token is sent without encryption." : HardeningCopy.httpPassword
     }
 }
 
@@ -165,5 +165,83 @@ struct LoginEditorState {
         deletePending = false
         confirmingDelete = false
         if confirmed { delete() }
+    }
+}
+
+enum ServerLoginMethod: String, CaseIterable {
+    case password = "Username and password"
+    case token = "Access token"
+}
+
+struct ServerLoginInput {
+    var method: ServerLoginMethod = .password
+    var username = ""
+    var secret = ""
+
+    var credential: ServerCredential {
+        method == .token ? .accessToken(secret) : .basic(username: username, password: secret)
+    }
+
+    var isValid: Bool {
+        guard !secret.isEmpty else { return false }
+        if method == .password { return !username.isEmpty }
+        // Bearer values cannot contain whitespace or controls. The server validates the token's
+        // existence, expiry and access; don't impose a fixed token length on future servers.
+        return secret.hasPrefix("tk_") && secret.count > 3 && secret.utf8.allSatisfy {
+            (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 95
+        }
+    }
+
+    func canSave(isEditing: Bool, originalMethod: ServerLoginMethod) -> Bool {
+        if isEditing && method == originalMethod && secret.isEmpty {
+            return method == .token || !username.isEmpty
+        }
+        return isValid
+    }
+}
+
+/// Shared by the add-topic login, re-authentication and Settings. Tokens stay masked and never
+/// enter Password AutoFill's username/password fields.
+struct ServerLoginFields: View {
+    @Binding var input: ServerLoginInput
+
+    var body: some View {
+        ForEach(ServerLoginMethod.allCases, id: \.self) { method in
+            Button {
+                if input.method != method {
+                    input.secret = ""
+                    input.method = method
+                }
+            } label: {
+                HStack {
+                    Text(method.rawValue).fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    if input.method == method {
+                        Image(systemName: "checkmark").accessibilityHidden(true)
+                    }
+                }
+                .foregroundColor(.primary)
+            }
+            .accessibilityAddTraits(input.method == method ? [.isSelected] : [])
+        }
+        if input.method == .password {
+            TextField("Username", text: $input.username)
+                .textContentType(.username)
+                .disableAutocapitalization()
+                .disableAutocorrection(true)
+                .accessibilityIdentifier("server-username")
+            SecureField("Password", text: $input.secret)
+                .textContentType(.password)
+                .accessibilityIdentifier("server-password")
+        } else {
+            SecureField("Access token, tk_…", text: $input.secret)
+                .disableAutocapitalization()
+                .disableAutocorrection(true)
+                .accessibilityLabel("Access token")
+                .accessibilityIdentifier("server-access-token")
+            Text("Paste an access token created in your server's account settings. It is stored securely in the Keychain.")
+                .font(.footnote).foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }

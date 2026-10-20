@@ -1300,6 +1300,38 @@ class Store: ObservableObject {
         return saved
     }
 
+    /// A typed replacement uses the existing Keychain item and keeps secrets out of Core Data.
+    @discardableResult
+    func saveUser(baseUrl: String, credential: ServerCredential) -> Bool {
+        var saved = false
+        context.performAndWait {
+            let normalized = normalizeBaseUrl(baseUrl)
+            let existing = getUser(baseUrl: normalized)
+            let oldUsername = existing?.username ?? "?"
+            let previous: ServerCredential?
+            switch credentialStore.readCredential(baseUrl: normalized, username: oldUsername) {
+            case .found(let value): previous = value
+            case .notFound: previous = nil
+            case .failed: return
+            }
+            guard credentialStore.setCredential(credential, baseUrl: normalized) else { return }
+            do {
+                let user = existing ?? User(context: context)
+                user.baseUrl = normalized
+                user.username = credential.isAccessToken ? "" : credential.username
+                user.password = ""
+                try context.save()
+                saved = true
+            } catch {
+                let restored = previous.map { credentialStore.setCredential($0, baseUrl: normalized) }
+                    ?? credentialStore.deletePassword(baseUrl: normalized)
+                if !restored { Log.w(Store.tag, "Cannot restore credential after account save failed") }
+                rollbackAndRefresh()
+            }
+        }
+        return saved
+    }
+
     /// Moves any password still sitting in Core Data into the Keychain and blanks the column.
     /// Idempotent, and safe to call on every launch: users written by a newer build already have a
     /// nil password, so this walks a short list and does nothing.
