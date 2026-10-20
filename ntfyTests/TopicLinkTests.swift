@@ -1,3 +1,6 @@
+import AVFoundation
+import CoreImage
+import UIKit
 import XCTest
 @testable import ntfy
 
@@ -77,6 +80,125 @@ final class TopicLinkTests: XCTestCase {
     func testReservedInvalidAndOtherHostHaveNoRoutingDecision() {
         for url in ["https://ntfy-me.com/docs", "https://ntfy-me.com/a/b", "https://ntfy.sh/alerts"] {
             XCTAssertNil(TopicLinkRoute.resolve(URL(string: url)!, subscriptionURLs: [url]))
+        }
+    }
+}
+
+/// QR codes: what the app encodes, and how a decoded code is parsed and routed (upstream ntfy #756).
+final class TopicQRCodeTests: XCTestCase {
+    private func scanned(_ text: String) -> TopicLink? { TopicLink(scanned: text) }
+
+    func testUniversalLinkCarriesItsServer() {
+        XCTAssertEqual(TopicLink(url: URL(string: "https://NTFY-ME.COM:443/Alerts")!)?.server, "https://ntfy-me.com")
+    }
+
+    func testScannedNtfyMeTopicMatchesTheUniversalLink() {
+        let link = scanned("https://ntfy-me.com/Alerts-42")
+        XCTAssertEqual(link?.server, "https://ntfy-me.com")
+        XCTAssertEqual(link?.topic, "Alerts-42")
+        XCTAssertEqual(link, TopicLink(url: URL(string: "https://ntfy-me.com/Alerts-42")!))
+    }
+
+    func testSelfHostedServerWithPortAndPathPrefix() {
+        let link = scanned("https://Push.Example.org:8443/ntfy/sub/home_alerts?x=1#frag")
+        XCTAssertEqual(link?.server, "https://push.example.org:8443/ntfy/sub")
+        XCTAssertEqual(link?.topic, "home_alerts")
+        XCTAssertEqual(scanned("http://192.168.1.20:8080/garage/")?.server, "http://192.168.1.20:8080")
+        XCTAssertEqual(scanned("http://[fd00::5]:2586/garage")?.server, "http://[fd00::5]:2586")
+        // Default ports are dropped so the stored URL and the scanned one compare equal.
+        XCTAssertEqual(scanned("https://ntfy.sh:443/a")?.server, "https://ntfy.sh")
+        XCTAssertEqual(scanned("http://ntfy.home:80/a")?.server, "http://ntfy.home")
+    }
+
+    func testAndroidDeepLinkFormat() {
+        XCTAssertEqual(scanned("ntfy://ntfy.sh/alerts"), scanned("https://ntfy.sh/alerts"))
+        XCTAssertEqual(scanned("ntfy://ntfy.home:2586/alerts?secure=false&display=Garage"),
+                       scanned("http://ntfy.home:2586/alerts"))
+        XCTAssertNil(scanned("ntfy://ntfy.sh/prefix/alerts"))
+    }
+
+    func testAddressWithoutSchemeMeansHTTPS() {
+        XCTAssertEqual(scanned("  ntfy.sh/alerts\n"), scanned("https://ntfy.sh/alerts"))
+    }
+
+    func testNonTopicAddressesAreRejected() {
+        for text in ["https://ntfy.sh/", "https://ntfy.sh", "https://ntfy.sh/docs/publish/", "https://ntfy.sh/app",
+                     "https://ntfy.sh/alerts.json", "https://example.com/a/b.html", "https://ntfy.sh/a%2Fb",
+                     "https://ntfy.sh//alerts", "https://user:pw@ntfy.sh/alerts", "ftp://ntfy.sh/alerts",
+                     "mailto:someone@example.com", "tel:+15551234567", "ntfy://ntfy.sh/v1",
+                     "https://ntfy.sh/" + String(repeating: "a", count: 65)] {
+            XCTAssertNil(scanned(text), text)
+        }
+    }
+
+    func testGarbageIsRejected() {
+        for text in ["", "   ", "alerts", "hello world", "WIFI:S:Home;T:WPA;P:secret;;",
+                     "BEGIN:VCARD\nFN:Someone\nEND:VCARD", "🙂/🙂", "://", "https://"] {
+            XCTAssertNil(scanned(text), text)
+        }
+    }
+
+    func testScanOfANewTopicRoutesToTheAddSheetOnItsServer() {
+        let route = TopicLinkRoute.resolve(scanned: "https://push.example.org:8443/ntfy/alerts",
+                                           subscriptionURLs: ["https://ntfy-me.com/alerts", "https://push.example.org/ntfy/alerts"])
+        XCTAssertEqual(route, .add(TopicLink(scanned: "https://push.example.org:8443/ntfy/alerts")!))
+    }
+
+    func testScanOfASubscribedTopicOpensTheStoredOne() {
+        let stored = "https://Push.Example.org:443/ntfy/alerts"
+        XCTAssertEqual(TopicLinkRoute.resolve(scanned: "ntfy://push.example.org/alerts", subscriptionURLs: [stored]),
+                       .add(TopicLink(scanned: "https://push.example.org/alerts")!))
+        XCTAssertEqual(TopicLinkRoute.resolve(scanned: "https://push.example.org/ntfy/alerts/", subscriptionURLs: [stored]),
+                       .open(stored))
+    }
+
+    func testScanOfANonTopicHasNoRoute() {
+        XCTAssertNil(TopicLinkRoute.resolve(scanned: "https://ntfy.sh/docs", subscriptionURLs: []))
+        XCTAssertNil(TopicLinkRoute.resolve(scanned: "not a link", subscriptionURLs: []))
+    }
+
+    func testPayloadIsTheTopicURL() {
+        XCTAssertEqual(TopicQRCode.payload(baseUrl: "https://ntfy-me.com/", topic: "Alerts"), "https://ntfy-me.com/Alerts")
+        XCTAssertEqual(TopicQRCode.payload(baseUrl: "http://ntfy.home:2586/sub", topic: "a"), "http://ntfy.home:2586/sub/a")
+    }
+
+    func testGeneratedCodeDecodesBackToTheSameTopic() throws {
+        for (baseUrl, topic) in [("https://ntfy-me.com", "Alerts-42"), ("http://push.example.org:8443/ntfy", "home_alerts")] {
+            let payload = TopicQRCode.payload(baseUrl: baseUrl, topic: topic)
+            let image = try XCTUnwrap(TopicQRCode.image(for: payload))
+            let ciImage = try XCTUnwrap(CIImage(image: image))
+            let detector = try XCTUnwrap(CIDetector(ofType: CIDetectorTypeQRCode, context: nil,
+                                                    options: [CIDetectorAccuracy: CIDetectorAccuracyHigh]))
+            let decoded = detector.features(in: ciImage).compactMap { ($0 as? CIQRCodeFeature)?.messageString }
+            XCTAssertEqual(decoded, [payload])
+            let link = try XCTUnwrap(TopicLink(scanned: decoded[0]))
+            XCTAssertEqual(link.server, baseUrl)
+            XCTAssertEqual(link.topic, topic)
+        }
+    }
+
+    func testCodeIsLargeEnoughToReadAtArmsLength() throws {
+        // 12 pixels per module; a short topic URL is a 25-module (version 2) code or larger.
+        let image = try XCTUnwrap(TopicQRCode.image(for: "https://ntfy-me.com/alerts"))
+        XCTAssertGreaterThanOrEqual(image.size.width, 25 * 12)
+        XCTAssertEqual(image.size.width, image.size.height)
+    }
+
+    func testCameraStates() {
+        XCTAssertEqual(TopicQRCameraState.from(hasCamera: false, status: .authorized), .unavailable)
+        XCTAssertEqual(TopicQRCameraState.from(hasCamera: true, status: .authorized), .scanning)
+        XCTAssertEqual(TopicQRCameraState.from(hasCamera: true, status: .notDetermined), .needsPermission)
+        XCTAssertEqual(TopicQRCameraState.from(hasCamera: true, status: .denied), .denied)
+        XCTAssertEqual(TopicQRCameraState.from(hasCamera: true, status: .restricted), .denied)
+    }
+}
+
+final class TopicQRScannerTextTests: XCTestCase {
+    func testRejectedLinksAreNamedButOtherCodesStayOffScreen() {
+        XCTAssertEqual(TopicQRScannerView.rejectionText("https://ntfy.sh/docs"),
+                       "That code isn't an ntfy topic address:\nhttps://ntfy.sh/docs")
+        for secret in ["WIFI:S:Home;T:WPA;P:secret;;", "BEGIN:VCARD\nFN:Someone\nEND:VCARD", "otpauth://totp/x?secret=ABC"] {
+            XCTAssertEqual(TopicQRScannerView.rejectionText(secret), "That code isn't an ntfy topic address.", secret)
         }
     }
 }
