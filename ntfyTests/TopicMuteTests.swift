@@ -153,6 +153,118 @@ final class TopicMuteTests: XCTestCase {
             for disk in store.container.persistentStoreCoordinator.persistentStores { try store.container.persistentStoreCoordinator.remove(disk) }
         }
     }
+
+    func testEveryLegacyModelMigratesHistoryAttachmentsAndSharedMute() throws {
+        let modelURL = try XCTUnwrap(Bundle.main.url(forResource: "ntfy", withExtension: "momd"))
+        let currentModel = Store.shared.container.managedObjectModel
+        let versions = ["Model"] + (2...7).map { "Model \($0)" }
+        for version in versions {
+            let failuresBefore = testRun?.failureCount ?? 0
+            do {
+                try XCTContext.runActivity(named: "\(version) to current model") { _ in
+                    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    let url = directory.appendingPathComponent("legacy.sqlite")
+                    var stores: [Store] = []
+                    defer {
+                        for store in stores.reversed() {
+                            store.context.reset()
+                            for disk in store.container.persistentStoreCoordinator.persistentStores {
+                                try? store.container.persistentStoreCoordinator.remove(disk)
+                            }
+                        }
+                        try? FileManager.default.removeItem(at: directory)
+                    }
+                    let oldModel = try XCTUnwrap(NSManagedObjectModel(contentsOf: modelURL.appendingPathComponent(version + ".mom")))
+                    let hasReadState = oldModel.entitiesByName["Notification"]?.attributesByName["read"] != nil
+                    // Fail this case if Core Data cannot infer a lightweight mapping. No custom mapping.
+                    _ = try NSMappingModel.inferredMappingModel(forSourceModel: oldModel, destinationModel: currentModel)
+                    try autoreleasepool {
+                        let coordinator = NSPersistentStoreCoordinator(managedObjectModel: oldModel)
+                        let disk = try coordinator.addPersistentStore(ofType: NSSQLiteStoreType, configurationName: nil, at: url)
+                        defer { try? coordinator.remove(disk) }
+                        let writer = NSManagedObjectContext(concurrencyType: .mainQueueConcurrencyType)
+                        writer.persistentStoreCoordinator = coordinator
+                        for index in 0..<2 {
+                            // Use generic instances without changing the historical model or its hashes.
+                            let sub = NSManagedObject(entity: try XCTUnwrap(oldModel.entitiesByName["Subscription"]), insertInto: writer)
+                            sub.setValue("https://mute.example", forKey: "baseUrl")
+                            sub.setValue("legacy-\(index)", forKey: "topic")
+                            sub.setValue("Saved topic \(index)", forKey: "customDisplayName")
+                            sub.setValue("legacy-id-\(index)", forKey: "lastNotificationId")
+                            let row = NSManagedObject(entity: try XCTUnwrap(oldModel.entitiesByName["Notification"]), insertInto: writer)
+                            let fields: [String: Any] = [
+                                "id": "legacy-id-\(index)", "title": "Saved title \(index)",
+                                "message": "Saved body \(index)", "time": Int64(1_700_000_000 + index), "priority": Int16(3 + index),
+                                "attachmentLocalPath": "/saved/legacy-\(index).txt", "attachmentName": "legacy-\(index).txt",
+                                "attachmentType": "text/plain", "attachmentUrl": "https://mute.example/file/legacy-\(index).txt",
+                                "attachmentSize": Int64(4096 + index), "attachmentExpires": Int64(2_000_000_000 + index),
+                                "attachmentProgress": Int16(100)
+                            ]
+                            for (key, value) in fields { row.setValue(value, forKey: key) }
+                            if hasReadState { row.setValue(index == 0, forKey: "read") }
+                            row.setValue(sub, forKey: "subscription")
+                        }
+                        try writer.save()
+                        writer.reset()
+                    }
+                    let oldMetadata = try NSPersistentStoreCoordinator.metadataForPersistentStore(ofType: NSSQLiteStoreType, at: url, options: nil)
+                    XCTAssertTrue(oldModel.isConfiguration(withName: nil, compatibleWithStoreMetadata: oldMetadata))
+
+                    // Exercise Store's production automatic/inferred migration options on the old file.
+                    let app = Store(inMemory: true, storeURL: url)
+                    stores.append(app)
+                    XCTAssertEqual(app.container.persistentStoreCoordinator.persistentStores.count, 1)
+                    _ = try XCTUnwrap(app.container.persistentStoreCoordinator.persistentStores.first)
+                    let migratedMetadata = try NSPersistentStoreCoordinator.metadataForPersistentStore(ofType: NSSQLiteStoreType, at: url, options: nil)
+                    XCTAssertTrue(currentModel.isConfiguration(withName: nil, compatibleWithStoreMetadata: migratedMetadata))
+                    let subscriptions = try XCTUnwrap(app.getSubscriptions())
+                    XCTAssertEqual(subscriptions.count, 2)
+                    let messages = try app.context.fetch(NSFetchRequest<ntfy.Notification>(entityName: "Notification"))
+                    XCTAssertEqual(messages.count, 2)
+                    for index in 0..<2 {
+                        let sub = try XCTUnwrap(subscriptions.first { $0.topic == "legacy-\(index)" })
+                        XCTAssertEqual(sub.baseUrl, "https://mute.example")
+                        XCTAssertEqual(sub.customDisplayName, "Saved topic \(index)")
+                        XCTAssertEqual(sub.lastNotificationId, "legacy-id-\(index)")
+                        XCTAssertNil(sub.mutedUntil)
+                        XCTAssertEqual(sub.notificationCount(), 1)
+                        let row = try XCTUnwrap(messages.first { $0.id == "legacy-id-\(index)" })
+                        XCTAssertEqual(row.subscription, sub)
+                        XCTAssertEqual(row.title, "Saved title \(index)")
+                        XCTAssertEqual(row.message, "Saved body \(index)")
+                        XCTAssertEqual(row.time, Int64(1_700_000_000 + index))
+                        XCTAssertEqual(row.priority, Int16(3 + index))
+                        // Models 1 and 2 predate read state; their rows receive the current true default.
+                        XCTAssertEqual(row.read, hasReadState ? index == 0 : true)
+                        XCTAssertEqual(sub.unreadCount(), hasReadState && index == 1 ? 1 : 0)
+                        XCTAssertEqual(row.attachmentLocalPath, "/saved/legacy-\(index).txt")
+                        XCTAssertEqual(row.attachmentName, "legacy-\(index).txt")
+                        XCTAssertEqual(row.attachmentType, "text/plain")
+                        XCTAssertEqual(row.attachmentUrl, "https://mute.example/file/legacy-\(index).txt")
+                        XCTAssertEqual(row.attachmentSize, Int64(4096 + index))
+                        XCTAssertEqual(row.attachmentExpires, Int64(2_000_000_000 + index))
+                        XCTAssertEqual(row.attachmentProgress, 100)
+                    }
+                    let nse = Store(inMemory: true, storeURL: url)
+                    stores.append(nse)
+                    let sub = try XCTUnwrap(subscriptions.first { $0.topic == "legacy-0" })
+                    XCTAssertFalse(nse.isTopicMuted(baseUrl: sub.baseUrl!, topic: sub.topic!, now: now))
+                    let deadline = now.addingTimeInterval(120)
+                    try app.setTopicMute(until: deadline, subscription: sub)
+                    XCTAssertTrue(nse.isTopicMuted(baseUrl: sub.baseUrl!, topic: sub.topic!, now: now))
+                    XCTAssertEqual(nse.getSubscription(baseUrl: sub.baseUrl!, topic: sub.topic!)?.mutedUntil, deadline)
+                    XCTAssertFalse(nse.isTopicMuted(baseUrl: sub.baseUrl!, topic: "legacy-1", now: now))
+                    XCTAssertFalse(nse.isTopicMuted(baseUrl: sub.baseUrl!, topic: sub.topic!, now: deadline))
+                }
+                if testRun?.failureCount == failuresBefore {
+                    print("MUTE_LEGACY_MIGRATION_PASS \(version)")
+                }
+            } catch {
+                XCTFail("\(version) lightweight migration failed: \(error)")
+            }
+        }
+    }
 }
 
 /// Uses only 1.18 APIs so these tests compile and fail as assertions on main.

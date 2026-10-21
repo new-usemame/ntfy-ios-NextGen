@@ -156,7 +156,7 @@
         F11900000000000000000011 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopicMute.swift; sourceTree = "<group>"; };
         F11900000000000000000012 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopicMuteView.swift; sourceTree = "<group>"; };
         F11900000000000000000013 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopicMuteTests.swift; sourceTree = "<group>"; };
-        F11900000000000000000014 = {isa = PBXFileReference; lastKnownFileType = wrapper.xcdatamodel; path = "Model Mute.xcdatamodel"; sourceTree = "<group>"; };
+        F11900000000000000000014 = {isa = PBXFileReference; lastKnownFileType = wrapper.xcdatamodel; path = "Model 8.xcdatamodel"; sourceTree = "<group>"; };
 		118B00010000000000000003 /* TopicLinkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopicLinkTests.swift; sourceTree = "<group>"; };
 		118B00010000000000000001 /* TopicLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopicLink.swift; sourceTree = "<group>"; };
 		BA1180000000000000000011 /* ServerContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerContractTests.swift; sourceTree = "<group>"; };
@@ -1121,9 +1121,9 @@
 				9474F1FD2830830700CDE4DD /* Model 5.xcdatamodel */,
 				C1EA00062830830700CDE4DD /* Model 6.xcdatamodel */,
                 A18000130000000000000001 /* Model 7.xcdatamodel */,
-                F11900000000000000000014 /* Model Mute.xcdatamodel */,
+                F11900000000000000000014 /* Model 8.xcdatamodel */,
 			);
-			currentVersion = F11900000000000000000014 /* Model Mute.xcdatamodel */;
+			currentVersion = F11900000000000000000014 /* Model 8.xcdatamodel */;
 			path = ntfy.xcdatamodeld;
 			sourceTree = "<group>";
 			versionGroupType = wrapper.xcdatamodel;
