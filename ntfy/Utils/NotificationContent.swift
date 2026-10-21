@@ -438,9 +438,9 @@ private func fallbackAttachmentSummary(attachment: MessageAttachment) -> String 
         parts.append(formatBytes(size))
     }
     if attachment.isExpired() {
-        parts.append("expired")
+        parts.append(String(localized: "expired"))
     }
-    return "Attachment: " + parts.joined(separator: ", ")
+    return String(localized: "Attachment: \(parts.joined(separator: ", "))")
 }
 
 /// Select using server + topic + sequence, never request identifiers alone: APNs identifiers do

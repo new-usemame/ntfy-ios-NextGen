@@ -10,6 +10,11 @@ struct OpenSourceComponent: Identifiable, Hashable {
 
     var id: String { name }
     var fullText: String { [notice, licenseText].compactMap { $0 }.joined(separator: "\n\n") }
+    var localizedFullText: String {
+        [notice, licenseText].compactMap { $0 }
+            .map { Bundle.main.localizedString(forKey: $0, value: $0, table: "Legal") }
+            .joined(separator: "\n\n")
+    }
 }
 
 enum OpenSourceLicenses {
@@ -31,16 +36,16 @@ enum OpenSourceLicenses {
 struct LicensesView: View {
     var body: some View {
         List {
-            Section(footer: Text("NTFY me is built on these open-source projects.")) {
+            Section(footer: Text(String(localized: "NTFY me is built on these open-source projects."))) {
                 ForEach(OpenSourceLicenses.components) { component in
                     NavigationLink {
-                        LicenseTextView(text: component.detail + "\n\n" + OpenSourceLicenses.reflowed(component.fullText))
+                        LicenseTextView(text: Bundle.main.localizedString(forKey: component.detail, value: component.detail, table: nil) + "\n\n" + OpenSourceLicenses.reflowed(component.localizedFullText))
                             .navigationTitle(component.name)
                             .navigationBarTitleDisplayMode(.inline)
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(component.name)
-                            Text(component.licenseName)
+                            Text(LocalizedStringKey(component.licenseName))
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
                         }
@@ -48,7 +53,7 @@ struct LicensesView: View {
                 }
             }
         }
-        .navigationTitle("Licenses")
+        .navigationTitle(String(localized: "Licenses"))
     }
 }
 

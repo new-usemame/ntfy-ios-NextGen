@@ -46,6 +46,9 @@ extension Notification {
     }
     
     func formatMessage() -> String {
+        // A stored locked placeholder is app copy, not server content. Resolve it again after
+        // a language change without touching any readable message from the sender.
+        if encryptionState == .locked { return TopicEncryption.lockedPlaceholder }
         let message = message ?? ""
         if let title = title, title != "" {
             return message
@@ -95,7 +98,7 @@ extension Notification {
             return nil
         }
         return MessageAttachment(
-            name: attachmentName ?? "attachment",
+            name: attachmentName ?? String(localized: "attachment"),
             type: attachmentType,
             size: attachmentSize == 0 ? nil : attachmentSize,
             expires: attachmentExpires == 0 ? nil : attachmentExpires,
@@ -164,45 +167,45 @@ extension Notification {
         let deleted = !hasStoredLocalFile && (progress == .done || progress == .deleted)
         if progress == .none {
             if attachmentIsExpired() {
-                parts.append("Not downloaded, expired")
+                parts.append(String(localized: "Not downloaded, expired"))
             } else if let expiry = attachmentExpiryShortDateString() {
-                parts.append("Not downloaded, expires \(expiry)")
+                parts.append(String(localized: "Not downloaded, expires \(expiry)"))
             } else {
-                parts.append("Not downloaded")
+                parts.append(String(localized: "Not downloaded"))
             }
         } else if case .progress(let percent) = progress {
-            parts.append("Downloading \(percent)%")
+            parts.append(String(localized: "Downloading \(Int(percent))%"))
         } else if progress == .failed {
             if attachmentIsExpired() {
-                parts.append("Download failed, expired")
+                parts.append(String(localized: "Download failed, expired"))
             } else if let expiry = attachmentExpiryShortDateString() {
-                parts.append("Download failed, expires \(expiry)")
+                parts.append(String(localized: "Download failed, expires \(expiry)"))
             } else {
-                parts.append("Download failed")
+                parts.append(String(localized: "Download failed"))
             }
         } else if progress == .canceled {
             if attachmentIsExpired() {
-                parts.append("Download canceled, expired")
+                parts.append(String(localized: "Download canceled, expired"))
             } else if let expiry = attachmentExpiryShortDateString() {
-                parts.append("Download canceled, expires \(expiry)")
+                parts.append(String(localized: "Download canceled, expires \(expiry)"))
             } else {
-                parts.append("Download canceled")
+                parts.append(String(localized: "Download canceled"))
             }
         } else if progress == .skipped {
             if attachmentIsExpired() {
-                parts.append("Not downloaded, expired")
+                parts.append(String(localized: "Not downloaded, expired"))
             } else if let expiry = attachmentExpiryShortDateString() {
-                parts.append("Not auto-downloaded, expires \(expiry)")
+                parts.append(String(localized: "Not auto-downloaded, expires \(expiry)"))
             } else {
-                parts.append("Not auto-downloaded")
+                parts.append(String(localized: "Not auto-downloaded"))
             }
         } else if deleted {
             if attachmentIsExpired() {
-                parts.append("Deleted, expired")
+                parts.append(String(localized: "Deleted, expired"))
             } else if let expiry = attachmentExpiryShortDateString() {
-                parts.append("Deleted, expires \(expiry)")
+                parts.append(String(localized: "Deleted, expires \(expiry)"))
             } else {
-                parts.append("Deleted")
+                parts.append(String(localized: "Deleted"))
             }
         }
         return parts.joined(separator: " · ")
@@ -219,20 +222,20 @@ extension Notification {
 
         let progress = attachmentProgressState(overrideState: overrideState)
         if progress == .done {
-            parts.append("downloaded")
+            parts.append(String(localized: "downloaded"))
         } else if progress.isDownloading {
-            parts.append("downloading")
+            parts.append(String(localized: "downloading"))
         } else if progress == .failed {
-            parts.append("download failed")
+            parts.append(String(localized: "download failed"))
         } else if progress == .canceled {
-            parts.append("download canceled")
+            parts.append(String(localized: "download canceled"))
         } else if progress == .skipped {
-            parts.append("not auto-downloaded")
+            parts.append(String(localized: "not auto-downloaded"))
         } else if attachmentIsExpired() {
-            parts.append("expired")
+            parts.append(String(localized: "expired"))
         }
 
-        return "Attachment: " + parts.joined(separator: ", ")
+        return String(localized: "Attachment: \(parts.joined(separator: ", "))")
     }
 
     private func attachmentExpiryShortDateString() -> String? {
@@ -329,7 +332,7 @@ struct MessageAttachment: Codable {
                 return filename
             }
         }
-        return "attachment"
+        return String(localized: "attachment")
     }
 
     func systemImageName() -> String {
@@ -448,14 +451,14 @@ struct Message: Decodable {
     static func normalizedBody(_ body: String?, encoding: String?) -> String? {
         guard let body, let encoding, !encoding.isEmpty else { return body }
         guard encoding == "base64" else {
-            return "This message uses an unsupported encoding."
+            return String(localized: "This message uses an unsupported encoding.")
         }
         let encoded = body.components(separatedBy: .whitespacesAndNewlines).joined()
         guard let data = Data(base64Encoded: encoded) else {
-            return "This message could not be decoded (invalid base64)."
+            return String(localized: "This message could not be decoded (invalid base64).")
         }
         guard let text = String(data: data, encoding: .utf8) else {
-            return "This message contains binary data and cannot be displayed as text."
+            return String(localized: "This message contains binary data and cannot be displayed as text.")
         }
         return text
     }
@@ -512,7 +515,7 @@ struct Message: Decodable {
         let attachment: MessageAttachment?
         if let attachmentUrl = attachmentUrl, !attachmentUrl.isEmpty {
             attachment = MessageAttachment(
-                name: userInfo["attachment_name"] as? String ?? "attachment",
+                name: userInfo["attachment_name"] as? String ?? String(localized: "attachment"),
                 type: userInfo["attachment_type"] as? String,
                 size: Int64(userInfo["attachment_size"] as? String ?? "0").flatMap { $0 == 0 ? nil : $0 },
                 expires: Int64(userInfo["attachment_expires"] as? String ?? "0").flatMap { $0 == 0 ? nil : $0 },
