@@ -52,8 +52,12 @@ struct TopicLink: Equatable {
         // A reserved name anywhere in the path is a server page (https://ntfy.sh/docs/publish), not a topic.
         guard (1...64).contains(topic.utf8.count), topic.utf8.allSatisfy({ allowed.contains($0) }),
               !segments.contains(where: { $0.isEmpty || Self.reservedNames.contains($0) }) else { return nil }
-        var server = scheme + "://" + host
-        if let port = parts.port, port != (scheme == "https" ? 443 : 80) { server += ":\(port)" }
+        // Our own server supports HTTPS. A scanned legacy HTTP link must resolve to the
+        // existing HTTPS subscription rather than creating a second, insecure address.
+        let normalizedScheme = host == "ntfy-me.com" ? "https" : scheme
+        var server = normalizedScheme + "://" + host
+        if let port = parts.port, port != (normalizedScheme == "https" ? 443 : 80),
+           !(host == "ntfy-me.com" && scheme == "http" && port == 80) { server += ":\(port)" }
         server += encoded.dropLast().map { "/" + $0 }.joined()
         self.server = server
         self.topic = topic

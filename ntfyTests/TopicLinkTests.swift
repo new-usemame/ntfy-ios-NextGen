@@ -162,9 +162,47 @@ final class TopicQRCodeTests: XCTestCase {
         XCTAssertEqual(TopicQRCode.payload(baseUrl: "http://ntfy.home:2586/sub", topic: "a"), "http://ntfy.home:2586/sub/a")
     }
 
+    func testPayloadRemovesAuthenticationAndURLMetadata() {
+        for server in ["https://user:password@push.example:8443/prefix?token=secret#private",
+                       "https://push.example:8443/prefix/?token=secret#private"] {
+            XCTAssertEqual(TopicQRCode.payload(baseUrl: server, topic: "Alerts"),
+                           "https://push.example:8443/prefix/Alerts")
+        }
+    }
+
+    func testPayloadPreservesEncodedServerPrefix() {
+        XCTAssertEqual(TopicQRCode.payload(baseUrl: "https://push.example/root%2Fproxy?token=secret", topic: "Alerts-42"),
+                       "https://push.example/root%2Fproxy/Alerts-42")
+    }
+
+    func testPayloadRefusesAddressesThatCannotRoundTripAsTopics() {
+        for server in ["", "https://", "file:///private", "ftp://push.example", "https://push.example/docs",
+                       "https://push.example//prefix", "https://push.example:99999"] {
+            XCTAssertNil(TopicQRCode.payload(baseUrl: server, topic: "Alerts"), server)
+        }
+        for topic in ["", "docs", "a/b", "a?token=secret", String(repeating: "a", count: 65)] {
+            XCTAssertNil(TopicQRCode.payload(baseUrl: "https://push.example", topic: topic))
+        }
+    }
+
+    func testHTTPScanUsesHTTPSOnlyForTheAppsOwnHost() {
+        for code in ["http://NTFY-ME.COM/Alerts", "http://ntfy-me.com:80/Alerts",
+                     "ntfy://ntfy-me.com/Alerts?secure=false"] {
+            XCTAssertEqual(scanned(code)?.server, "https://ntfy-me.com")
+            XCTAssertEqual(TopicLinkRoute.resolve(scanned: code, subscriptionURLs: ["https://ntfy-me.com/Alerts"]),
+                           .open("https://ntfy-me.com/Alerts"))
+        }
+        XCTAssertEqual(scanned("http://ntfy-me.com.evil.test/Alerts")?.server, "http://ntfy-me.com.evil.test")
+        XCTAssertEqual(scanned("http://ntfy.home/Alerts")?.server, "http://ntfy.home")
+    }
+
     func testGeneratedCodeDecodesBackToTheSameTopic() throws {
-        for (baseUrl, topic) in [("https://ntfy-me.com", "Alerts-42"), ("http://push.example.org:8443/ntfy", "home_alerts")] {
-            let payload = TopicQRCode.payload(baseUrl: baseUrl, topic: topic)
+        for (baseUrl, topic, expectedServer) in [
+            ("https://ntfy-me.com", "Alerts-42", "https://ntfy-me.com"),
+            ("http://push.example.org:8443/ntfy", "home_alerts", "http://push.example.org:8443/ntfy"),
+            ("https://user:password@push.example.org/prefix?token=secret#private", "alerts", "https://push.example.org/prefix")
+        ] {
+            let payload = try XCTUnwrap(TopicQRCode.payload(baseUrl: baseUrl, topic: topic))
             let image = try XCTUnwrap(TopicQRCode.image(for: payload))
             let ciImage = try XCTUnwrap(CIImage(image: image))
             let detector = try XCTUnwrap(CIDetector(ofType: CIDetectorTypeQRCode, context: nil,
@@ -172,7 +210,7 @@ final class TopicQRCodeTests: XCTestCase {
             let decoded = detector.features(in: ciImage).compactMap { ($0 as? CIQRCodeFeature)?.messageString }
             XCTAssertEqual(decoded, [payload])
             let link = try XCTUnwrap(TopicLink(scanned: decoded[0]))
-            XCTAssertEqual(link.server, baseUrl)
+            XCTAssertEqual(link.server, expectedServer)
             XCTAssertEqual(link.topic, topic)
         }
     }
@@ -194,11 +232,74 @@ final class TopicQRCodeTests: XCTestCase {
 }
 
 final class TopicQRScannerTextTests: XCTestCase {
-    func testRejectedLinksAreNamedButOtherCodesStayOffScreen() {
+    func testRejectedCodesNeverExposeTheirContents() {
         XCTAssertEqual(TopicQRScannerView.rejectionText("https://ntfy.sh/docs"),
-                       "That code isn't an ntfy topic address:\nhttps://ntfy.sh/docs")
-        for secret in ["WIFI:S:Home;T:WPA;P:secret;;", "BEGIN:VCARD\nFN:Someone\nEND:VCARD", "otpauth://totp/x?secret=ABC"] {
+                       "That code isn't an ntfy topic address.")
+        for secret in ["https://user:password@example.org/topic", "http://example.org/docs?reset_token=abc#private",
+                       "ntfy://example.org/docs?token=secret", "WIFI:S:Home;T:WPA;P:secret;;",
+                       "BEGIN:VCARD\nFN:Someone\nEND:VCARD", "otpauth://totp/x?secret=ABC"] {
             XCTAssertEqual(TopicQRScannerView.rejectionText(secret), "That code isn't an ntfy topic address.", secret)
         }
+    }
+}
+
+final class TopicQRCameraLifecycleTests: XCTestCase {
+    func testReturningFromSettingsRefreshesDeniedAuthorization() {
+        let center = NotificationCenter()
+        var status = AVAuthorizationStatus.denied
+        let camera = TopicQRAuthorization(hasCamera: { true }, status: { status }, center: center)
+        camera.appear()
+        XCTAssertEqual(camera.state, .denied)
+        status = .authorized
+        center.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        XCTAssertEqual(camera.state, .scanning)
+        status = .denied
+        center.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        XCTAssertEqual(camera.state, .denied)
+    }
+
+    func testBackgroundStopsAndForegroundRestartsOnlyVisibleAuthorizedCapture() {
+        let center = NotificationCenter()
+        let queue = DispatchQueue(label: "test.qr.capture")
+        var authorized = true
+        var events = [String]()
+        let capture = TopicQRCaptureLifecycle(queue: queue, center: center, isActive: true,
+            authorized: { authorized }, start: { events.append("start") }, stop: { events.append("stop") })
+        capture.appear()
+        queue.sync {}
+        XCTAssertEqual(events.last, "start")
+        center.post(name: UIApplication.willResignActiveNotification, object: nil)
+        center.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+        queue.sync {}
+        XCTAssertEqual(events.last, "stop", "background capture must be explicitly stopped")
+        center.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        queue.sync {}
+        XCTAssertEqual(events.last, "start")
+        capture.disappear()
+        queue.sync {}
+        let dismissedEvents = events
+        center.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        queue.sync {}
+        XCTAssertEqual(events, dismissedEvents, "a dismissed scanner must not restart")
+        authorized = false
+        capture.appear()
+        queue.sync {}
+        XCTAssertEqual(events.last, "stop", "revoked access must prevent a restart")
+    }
+
+    func testPermissionCompletionWhileInactiveCannotStartCapture() {
+        let center = NotificationCenter()
+        let queue = DispatchQueue(label: "test.qr.inactive")
+        var events = [String]()
+        let capture = TopicQRCaptureLifecycle(queue: queue, center: center, isActive: false,
+            authorized: { true }, start: { events.append("start") }, stop: { events.append("stop") })
+        capture.appear()
+        queue.sync {}
+        XCTAssertFalse(events.contains("start"))
+        center.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        queue.sync {}
+        XCTAssertEqual(events.last, "start")
+        capture.disappear()
+        queue.sync {}
     }
 }

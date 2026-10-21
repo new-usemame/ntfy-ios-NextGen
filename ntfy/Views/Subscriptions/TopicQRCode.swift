@@ -7,8 +7,22 @@ import UIKit
 /// A topic's QR code holds its plain `https://<server>/<topic>` address. For ntfy-me.com the iPhone
 /// Camera app opens that as a Universal Link; for any server, the Add sheet's scanner reads it back.
 enum TopicQRCode {
-    static func payload(baseUrl: String, topic: String) -> String {
-        topicUrl(baseUrl: baseUrl, topic: topic)
+    static func payload(baseUrl: String, topic: String) -> String? {
+        guard var parts = URLComponents(string: baseUrl),
+              let scheme = parts.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              let host = parts.host, !host.isEmpty,
+              parts.port.map({ (1...65535).contains($0) }) ?? true else { return nil }
+        parts.user = nil
+        parts.password = nil
+        parts.query = nil
+        parts.fragment = nil
+        // Append a path component, so topic text cannot become query/fragment metadata.
+        if parts.percentEncodedPath.hasSuffix("/") { parts.percentEncodedPath.removeLast() }
+        guard let component = topic.addingPercentEncoding(withAllowedCharacters: .alphanumerics) else { return nil }
+        parts.percentEncodedPath += "/" + component
+        guard let address = parts.url?.absoluteString, let link = TopicLink(scanned: address),
+              link.topic == topic else { return nil }
+        return topicUrl(baseUrl: link.server, topic: link.topic)
     }
 
     /// Black modules on white with the standard four-module quiet zone, scaled by whole pixels so
@@ -30,13 +44,17 @@ struct TopicQRCodeView: View {
     @Binding var isShowing: Bool
     @State private var sharing = false
 
-    private var payload: String { TopicQRCode.payload(baseUrl: baseUrl, topic: topic) }
+    private var payload: String? { TopicQRCode.payload(baseUrl: baseUrl, topic: topic) }
+    private var shareItems: [Any] {
+        guard let payload, let url = URL(string: payload), let image = TopicQRCode.image(for: payload) else { return [] }
+        return [image, url]
+    }
 
     var body: some View {
         NavigationView {
             ScrollView {
                 VStack(spacing: 20) {
-                    if let image = TopicQRCode.image(for: payload) {
+                    if let payload, let image = TopicQRCode.image(for: payload) {
                         Image(uiImage: image)
                             .interpolation(.none)
                             .resizable()
@@ -47,20 +65,24 @@ struct TopicQRCodeView: View {
                             .background(Color.white)
                             .cornerRadius(12)
                             .accessibilityLabel("QR code for \(shortUrl(url: payload))")
-                    }
-                    Text(payload)
-                        .font(.callout.monospaced())
-                        .multilineTextAlignment(.center)
-                        .textSelection(.enabled)
-                    Label {
-                        Text("Anyone who scans this code can subscribe to this topic and read its messages, "
-                             + "unless the server requires a login. Share it only with people you trust.")
+                        Text(payload)
+                            .font(.callout.monospaced())
+                            .multilineTextAlignment(.center)
+                            .textSelection(.enabled)
+                        Label {
+                            Text("Anyone who scans this code can subscribe to this topic and read its messages, "
+                                 + "unless the server requires a login. Share it only with people you trust.")
+                                .fixedSize(horizontal: false, vertical: true)
+                        } icon: {
+                            Image(systemName: "exclamationmark.shield")
+                        }
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                    } else {
+                        Label("A safe topic address could not be created. Check the server and topic settings.",
+                              systemImage: "exclamationmark.triangle")
                             .fixedSize(horizontal: false, vertical: true)
-                    } icon: {
-                        Image(systemName: "exclamationmark.shield")
                     }
-                    .font(.footnote)
-                    .foregroundColor(.secondary)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(24)
@@ -78,11 +100,11 @@ struct TopicQRCodeView: View {
                         Image(systemName: "square.and.arrow.up")
                     }
                     .accessibilityLabel("Share")
+                    .disabled(shareItems.isEmpty)
                 }
             }
             .sheet(isPresented: $sharing) {
-                TopicQRShareSheet(items: [TopicQRCode.image(for: payload) as Any, URL(string: payload) as Any]
-                    .compactMap { $0 })
+                TopicQRShareSheet(items: shareItems)
             }
         }
     }
@@ -112,16 +134,124 @@ enum TopicQRCameraState: Equatable {
     }
 }
 
+/// Injectable camera authorization, shared by the scanner UI and lifecycle tests.
+final class TopicQRAuthorization: ObservableObject {
+    @Published private(set) var state: TopicQRCameraState
+    private let hasCamera: () -> Bool
+    private let status: () -> AVAuthorizationStatus
+    private let requestAccess: (@escaping (Bool) -> Void) -> Void
+    private let center: NotificationCenter
+    private var activationObserver: NSObjectProtocol?
+    private var requesting = false
+
+    init(hasCamera: @escaping () -> Bool = { AVCaptureDevice.default(for: .video) != nil },
+         status: @escaping () -> AVAuthorizationStatus = { AVCaptureDevice.authorizationStatus(for: .video) },
+         requestAccess: @escaping (@escaping (Bool) -> Void) -> Void = { AVCaptureDevice.requestAccess(for: .video, completionHandler: $0) },
+         center: NotificationCenter = .default) {
+        self.hasCamera = hasCamera
+        self.status = status
+        self.requestAccess = requestAccess
+        self.center = center
+        state = .from(hasCamera: hasCamera(), status: status())
+        activationObserver = center.addObserver(forName: UIApplication.didBecomeActiveNotification,
+                                                object: nil, queue: .main) { [weak self] _ in
+            self?.appear()
+        }
+    }
+
+    deinit {
+        if let activationObserver { center.removeObserver(activationObserver) }
+    }
+
+    func appear() {
+        state = .from(hasCamera: hasCamera(), status: status())
+        if state == .needsPermission && !requesting {
+            requesting = true
+            requestAccess { [weak self] _ in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.requesting = false
+                    self.state = .from(hasCamera: self.hasCamera(), status: self.status())
+                }
+            }
+        }
+    }
+}
+
+/// Serializes the blocking AVFoundation calls. Closures let tests observe real lifecycle decisions
+/// without requiring camera hardware.
+final class TopicQRCaptureLifecycle {
+    private let queue: DispatchQueue
+    private let start: () -> Void
+    private let stop: () -> Void
+    private let authorized: () -> Bool
+    private let center: NotificationCenter
+    private var observers = [NSObjectProtocol]()
+    // These inputs and the blocking session calls all live on the same serial queue. A late
+    // start cannot overtake a background/dismissal stop.
+    private var active: Bool
+    private var visible = false
+    private var running = false
+
+    init(queue: DispatchQueue, center: NotificationCenter = .default,
+         isActive: Bool = UIApplication.shared.applicationState == .active,
+         authorized: @escaping () -> Bool = { AVCaptureDevice.authorizationStatus(for: .video) == .authorized },
+         start: @escaping () -> Void, stop: @escaping () -> Void) {
+        self.queue = queue
+        self.start = start
+        self.stop = stop
+        self.authorized = authorized
+        self.center = center
+        active = isActive
+        for name in [UIApplication.willResignActiveNotification, UIApplication.didEnterBackgroundNotification,
+                     UIApplication.didBecomeActiveNotification] {
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                self?.setActive(note.name == UIApplication.didBecomeActiveNotification)
+            })
+        }
+    }
+
+    deinit {
+        observers.forEach(center.removeObserver)
+        let stop = stop
+        queue.async { stop() }
+    }
+
+    func appear() {
+        queue.async { [self] in visible = true; update() }
+    }
+
+    func disappear() {
+        queue.async { [self] in visible = false; update() }
+    }
+
+    private func setActive(_ value: Bool) {
+        queue.async { [self] in active = value; update() }
+    }
+
+    private func update() {
+        let shouldRun = active && visible && authorized()
+        guard shouldRun != running else { return }
+        running = shouldRun
+        if shouldRun { start() } else { stop() }
+    }
+}
+
 /// Reads one topic QR code. `onCode` gets every decoded string and returns whether it was a topic
 /// address; the caller closes this screen when it was.
 struct TopicQRScannerView: View {
     @Binding var isShowing: Bool
     let onCode: (String) -> Bool
-    @State private var state = TopicQRCameraState.from(
-        hasCamera: AVCaptureDevice.default(for: .video) != nil,
-        status: AVCaptureDevice.authorizationStatus(for: .video))
+    @StateObject private var camera: TopicQRAuthorization
     @State private var rejected: String?
     @State private var accepted = false
+
+    init(isShowing: Binding<Bool>, onCode: @escaping (String) -> Bool,
+         camera: TopicQRAuthorization? = nil) {
+        _isShowing = isShowing
+        self.onCode = onCode
+        _camera = StateObject(wrappedValue: camera ?? TopicQRAuthorization())
+    }
 
     var body: some View {
         NavigationView {
@@ -135,11 +265,7 @@ struct TopicQRScannerView: View {
                 }
         }
         .onAppear {
-            if state == .needsPermission {
-                AVCaptureDevice.requestAccess(for: .video) { granted in
-                    DispatchQueue.main.async { state = granted ? .scanning : .denied }
-                }
-            }
+            camera.appear()
             #if DEBUG
             // The simulator has no camera. This feeds a decoded string through the same path a real
             // scan takes, for UI checks only; release builds never read it.
@@ -152,7 +278,7 @@ struct TopicQRScannerView: View {
 
     @ViewBuilder
     private var content: some View {
-        switch state {
+        switch camera.state {
         case .scanning:
             QRCaptureView(onCode: deliver)
                 .ignoresSafeArea(edges: .bottom)
@@ -207,12 +333,9 @@ struct TopicQRScannerView: View {
         }
     }
 
-    /// Names a rejected web or ntfy link so the user can see what they scanned. Other codes (Wi-Fi
-    /// logins, contact cards) can hold secrets, so their text is never put on screen.
+    /// Any code, including a web link, can carry secrets. Never echo rejected input.
     static func rejectionText(_ code: String) -> String {
-        let scheme = URLComponents(string: code.trimmingCharacters(in: .whitespacesAndNewlines))?.scheme?.lowercased()
-        guard let scheme, ["http", "https", "ntfy"].contains(scheme) else { return "That code isn't an ntfy topic address." }
-        return "That code isn't an ntfy topic address:\n\(code)"
+        "That code isn't an ntfy topic address."
     }
 
     private func deliver(_ code: String) {
@@ -245,6 +368,10 @@ private struct QRCaptureView: UIViewControllerRepresentable {
         var onCode: (String) -> Void
         private let session = AVCaptureSession()
         private let preview: AVCaptureVideoPreviewLayer
+        private lazy var lifecycle = TopicQRCaptureLifecycle(
+            queue: DispatchQueue(label: "ntfy.qr.capture"),
+            start: { [session] in session.startRunning() },
+            stop: { [session] in session.stopRunning() })
 
         init(onCode: @escaping (String) -> Void) {
             self.onCode = onCode
@@ -276,14 +403,12 @@ private struct QRCaptureView: UIViewControllerRepresentable {
 
         override func viewWillAppear(_ animated: Bool) {
             super.viewWillAppear(animated)
-            let session = session
-            DispatchQueue.global(qos: .userInitiated).async { session.startRunning() }
+            lifecycle.appear()
         }
 
         override func viewWillDisappear(_ animated: Bool) {
             super.viewWillDisappear(animated)
-            let session = session
-            DispatchQueue.global(qos: .userInitiated).async { session.stopRunning() }
+            lifecycle.disappear()
         }
 
         func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput objects: [AVMetadataObject],
