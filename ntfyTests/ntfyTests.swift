@@ -7,6 +7,10 @@ import Security
 
 final class InMemoryCredentialStore: CredentialStoring {
     var failWrites = false
+    var failDeletes = false
+    var afterDelete: (() -> Void)?
+    var typedWriteAttempts = 0
+    var failTypedWriteAttempts: Set<Int> = []
     var passwordWrites: [String?] = []
     private var passwords: [String: ServerCredential] = [:]
     private var headers: [String: [String: String]] = [:]
@@ -47,14 +51,15 @@ final class InMemoryCredentialStore: CredentialStoring {
         defer { lock.unlock() }
         if passwordReadsFail { return .failed(errSecInteractionNotAllowed) }
         guard let value = passwords[baseUrl] else { return .notFound }
-        if case .basic(_, let password) = value { return .found(.basic(username: username, password: password)) }
+        if case .basic("", let password) = value { return .found(.basic(username: username, password: password)) }
         return .found(value)
     }
 
     func setCredential(_ credential: ServerCredential, baseUrl: String) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        guard !failWrites else { return false }
+        typedWriteAttempts += 1
+        guard !failWrites, !failTypedWriteAttempts.contains(typedWriteAttempts) else { return false }
         passwords[baseUrl] = credential
         return true
     }
@@ -70,7 +75,9 @@ final class InMemoryCredentialStore: CredentialStoring {
         lock.lock()
         defer { lock.unlock() }
         deleteRequests.append(baseUrl)
+        guard !failDeletes else { return false }
         passwords.removeValue(forKey: baseUrl)
+        afterDelete?()
         return true
     }
 
@@ -7548,15 +7555,15 @@ final class HardeningPolicyTests: XCTestCase {
         XCTAssertTrue(state.save { true })
         XCTAssertFalse(state.saveFailed)
         var deletions = 0
-        state.finishDelete(confirmed: true) { deletions += 1 }
+        state.finishDelete(confirmed: true) { deletions += 1; return true }
         XCTAssertEqual(deletions, 0)
         state.requestDelete()
         XCTAssertTrue(state.confirmingDelete)
-        state.finishDelete(confirmed: false) { deletions += 1 }
+        state.finishDelete(confirmed: false) { deletions += 1; return true }
         XCTAssertEqual(deletions, 0)
         state.requestDelete()
         state.confirmingDelete = false // SwiftUI dismisses its alert binding before invoking the action.
-        state.finishDelete(confirmed: true) { deletions += 1 }
+        state.finishDelete(confirmed: true) { deletions += 1; return true }
         XCTAssertEqual(deletions, 1)
     }
 
@@ -8093,5 +8100,139 @@ extension ntfyTests {
             auth: .init(username: nil, accessToken: true))
         XCTAssertTrue(command.contains("Authorization: Bearer <token>"))
         XCTAssertFalse(command.contains("--user"))
+    }
+}
+
+final class CredentialReviewTests: XCTestCase {
+    func testFailedKeychainDeleteKeepsTheAccountAndCredential() throws {
+        let credentials = InMemoryCredentialStore()
+        let store = Store(inMemory: true, credentialStore: credentials)
+        let base = "https://delete-review.example"
+        XCTAssertTrue(store.saveUser(baseUrl: base, credential: .accessToken("tk_delete-review")))
+        let user = try XCTUnwrap(store.getUser(baseUrl: base))
+        credentials.failDeletes = true
+        store.delete(user: user)
+        XCTAssertNotNil(store.getUser(baseUrl: base), "failed secret deletion must retain the account")
+        XCTAssertEqual(store.getBasicUser(baseUrl: base), .accessToken("tk_delete-review"))
+    }
+
+    func testCoreDataFailureCannotRequireAFailingCredentialRollback() throws {
+        for original: ServerCredential in [.basic(username: "old", password: "old-password"), .accessToken("tk_old-review")] {
+            let credentials = InMemoryCredentialStore()
+            let store = Store(inMemory: true, credentialStore: credentials)
+            let base = "https://replace-review.example"
+            XCTAssertTrue(store.saveUser(baseUrl: base, credential: original))
+            let replacement: ServerCredential = original.isAccessToken
+                ? .basic(username: "new", password: "new-password") : .accessToken("tk_new-review")
+            credentials.typedWriteAttempts = 0
+            credentials.failTypedWriteAttempts = [2] // A rollback write would fail after replacement succeeds.
+            _ = User(context: store.context) // Real validation error, not a mocked save result.
+            XCTAssertFalse(store.saveUser(baseUrl: base, credential: replacement))
+            XCTAssertEqual(store.getBasicUser(baseUrl: base), original)
+            XCTAssertEqual(credentials.typedWriteAttempts, 0, "validate the row before touching its credential")
+        }
+    }
+
+    func testNewAccountValidationFailureDoesNotInstallASecret() {
+        let credentials = InMemoryCredentialStore()
+        let store = Store(inMemory: true, credentialStore: credentials)
+        _ = User(context: store.context)
+        XCTAssertFalse(store.saveUser(baseUrl: "https://new-review.example", credential: .accessToken("tk_new-review")))
+        XCTAssertEqual(credentials.typedWriteAttempts, 0)
+        XCTAssertNil(store.getUser(baseUrl: "https://new-review.example"))
+    }
+
+    func testAccountDeletionValidationFailureKeepsItsCredential() throws {
+        let credentials = InMemoryCredentialStore()
+        let store = Store(inMemory: true, credentialStore: credentials)
+        let base = "https://delete-validation.example"
+        XCTAssertTrue(store.saveUser(baseUrl: base, credential: .accessToken("tk_keep-review")))
+        let user = try XCTUnwrap(store.getUser(baseUrl: base))
+        _ = User(context: store.context)
+        store.delete(user: user)
+        XCTAssertNotNil(store.getUser(baseUrl: base))
+        XCTAssertEqual(store.getBasicUser(baseUrl: base), .accessToken("tk_keep-review"))
+    }
+}
+
+extension CredentialReviewTests {
+    func testTypedKeychainUsernameIsStoredWithItsSecret() throws {
+        let keychain = KeychainCredentialStore.shared
+        guard keychain.isAvailable else { throw XCTSkip("requires signed Keychain host") }
+        let base = "https://typed-name-\(UUID().uuidString).example"
+        defer { keychain.deletePassword(baseUrl: base) }
+        XCTAssertTrue(keychain.setCredential(.basic(username: "current", password: "fixture-password"), baseUrl: base))
+        XCTAssertEqual(keychain.readCredential(baseUrl: base, username: "obsolete-legacy-name"),
+                       .found(.basic(username: "current", password: "fixture-password")))
+    }
+
+    func testMissingCredentialDoesNotDescribeATokenAccountAsPasswordLogin() throws {
+        let credentials = InMemoryCredentialStore()
+        let store = Store(inMemory: true, credentialStore: credentials)
+        let base = "https://missing-review.example"
+        XCTAssertTrue(store.saveUser(baseUrl: base, credential: .accessToken("tk_missing-review")))
+        XCTAssertTrue(credentials.deletePassword(baseUrl: base))
+        XCTAssertNil(store.getBasicUser(baseUrl: base))
+    }
+}
+
+extension CredentialReviewTests {
+    func testDeleteFailureReachesEditorAndCanBeRetried() throws {
+        let credentials = InMemoryCredentialStore()
+        let store = Store(inMemory: true, credentialStore: credentials)
+        let base = "https://delete-editor.example"
+        XCTAssertTrue(store.saveUser(baseUrl: base, credential: .accessToken("tk_editor-review")))
+        let user = try XCTUnwrap(store.getUser(baseUrl: base))
+        credentials.failDeletes = true
+        var editor = LoginEditorState()
+        editor.requestDelete()
+        editor.finishDelete(confirmed: true) { store.delete(user: user) }
+        XCTAssertTrue(editor.deleteFailed)
+        XCTAssertNotNil(store.getUser(baseUrl: base))
+        credentials.failDeletes = false
+        editor.requestDelete()
+        editor.finishDelete(confirmed: true) { store.delete(user: user) }
+        XCTAssertFalse(editor.deleteFailed)
+        XCTAssertNil(store.getUser(baseUrl: base))
+        XCTAssertEqual(credentials.readCredential(baseUrl: base, username: ""), .notFound)
+    }
+
+    func testTypedReplacementOwnsItsUsernameAndPreservesLegacyPasswordMigration() throws {
+        let credentials = InMemoryCredentialStore()
+        let store = Store(inMemory: true, credentialStore: credentials)
+        let base = "https://legacy-replacement.example"
+        let user = User(context: store.context)
+        user.baseUrl = base; user.username = "legacy"; user.password = "legacy-password"
+        try store.context.save()
+        XCTAssertTrue(store.saveUser(baseUrl: base, credential: .accessToken("tk_replace-review")))
+        XCTAssertEqual(user.password, "")
+        XCTAssertEqual(store.migrateCredentialsToKeychain(), 0)
+        XCTAssertEqual(store.getBasicUser(baseUrl: base), .accessToken("tk_replace-review"))
+        XCTAssertTrue(store.saveUser(baseUrl: base, credential: .basic(username: "current", password: "current-password")))
+        XCTAssertEqual(store.getBasicUser(baseUrl: base), .basic(username: "current", password: "current-password"))
+    }
+
+    func testFailedNewTypedCredentialWriteRemovesItsNewServerRow() {
+        let credentials = InMemoryCredentialStore()
+        let store = Store(inMemory: true, credentialStore: credentials)
+        credentials.failWrites = true
+        XCTAssertFalse(store.saveUser(baseUrl: "https://failed-new-review.example", credential: .accessToken("tk_new-review")))
+        XCTAssertNil(store.getUser(baseUrl: "https://failed-new-review.example"))
+    }
+}
+
+
+extension CredentialReviewTests {
+    func testDatabaseFailureAfterSecretDeletionRestoresTheCredential() throws {
+        let credentials = InMemoryCredentialStore()
+        let store = Store(inMemory: true, credentialStore: credentials)
+        let base = "https://delete-save-review.example"
+        XCTAssertTrue(store.saveUser(baseUrl: base, credential: .accessToken("tk_restore-review")))
+        let user = try XCTUnwrap(store.getUser(baseUrl: base))
+        defer { credentials.afterDelete = nil }
+        credentials.afterDelete = { _ = User(context: store.context) }
+        store.delete(user: user)
+        XCTAssertNotNil(store.getUser(baseUrl: base))
+        XCTAssertEqual(store.getBasicUser(baseUrl: base), .accessToken("tk_restore-review"))
     }
 }

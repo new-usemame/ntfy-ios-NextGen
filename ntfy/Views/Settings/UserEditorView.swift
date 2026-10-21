@@ -19,7 +19,7 @@ struct UserEditorView: View {
     
     let selectedUser: User?
     let onSave: (String, String, ServerCredential?) -> Bool
-    let onDelete: (User) -> Void
+    let onDelete: (User) -> Bool
     let onCancel: () -> Void
     
     @State private var baseUrl: String
@@ -31,7 +31,7 @@ struct UserEditorView: View {
     init(
         selectedUser: User?,
         onSave: @escaping (String, String, ServerCredential?) -> Bool,
-        onDelete: @escaping (User) -> Void,
+        onDelete: @escaping (User) -> Bool,
         onCancel: @escaping () -> Void
     ) {
         self.selectedUser = selectedUser
@@ -65,12 +65,16 @@ struct UserEditorView: View {
                     Text(HardeningCopy.saveLoginFailed).foregroundColor(.secondary)
                         .accessibilityIdentifier("login-save-error")
                 }
+                if editor.deleteFailed {
+                    Text(HardeningCopy.deleteLoginFailed).foregroundColor(.secondary)
+                        .accessibilityIdentifier("login-delete-error")
+                }
                 if !isNewUser {
                     Button(HardeningCopy.deleteLogin, role: .destructive) { editor.requestDelete() }
                 }
             }
             .alert(HardeningCopy.deleteTitle, isPresented: $editor.confirmingDelete) {
-                Button(HardeningCopy.cancel, role: .cancel) { editor.finishDelete(confirmed: false) {} }
+                Button(HardeningCopy.cancel, role: .cancel) { editor.finishDelete(confirmed: false) { true } }
                 Button(HardeningCopy.deleteLogin, role: .destructive) {
                     editor.finishDelete(confirmed: true, delete: deleteAction)
                 }
@@ -82,6 +86,7 @@ struct UserEditorView: View {
                    let credential = store.getBasicUser(baseUrl: selectedUser.baseUrl ?? "") {
                     originalMethod = credential.isAccessToken ? .token : .password
                     login.method = originalMethod
+                    login.username = credential.isAccessToken ? "" : credential.username
                 }
             }
             .navigationTitle(isNewUser ? "Add user" : "Edit user")
@@ -109,12 +114,15 @@ struct UserEditorView: View {
             enteredPassword: login.secret, storedPassword: nil, isNewUser: isNewUser
         )
         let replacement = enteredSecret.map { _ in login.credential }
+            ?? store.getBasicUser(baseUrl: baseUrl).map { current in
+                current.isAccessToken ? current : .basic(username: login.username, password: current.password)
+            }
         _ = editor.save { onSave(baseUrl, login.method == .token ? "" : login.username, replacement) }
     }
     
-    private func deleteAction() {
-        guard let selectedUser = selectedUser else { return }
-        onDelete(selectedUser)
+    private func deleteAction() -> Bool {
+        guard let selectedUser = selectedUser else { return false }
+        return onDelete(selectedUser)
     }
     
     private func isValid() -> Bool {
@@ -135,6 +143,7 @@ struct UserEditorView: View {
 /// New hardening copy stays together for the later localization pass.
 enum HardeningCopy {
     static let saveLoginFailed = "Couldn't save this login securely. Try again."
+    static let deleteLoginFailed = "Couldn't finish deleting this login. It is still listed. Try again."
     static let deleteLogin = "Delete login"
     static let deleteTitle = "Delete this login?"
     static let deleteMessage = "Topics on this server may need you to sign in again."
@@ -152,6 +161,7 @@ enum UrlSecurityNotice {
 
 struct LoginEditorState {
     var saveFailed = false
+    var deleteFailed = false
     var confirmingDelete = false
     private var deletePending = false
     mutating func save(_ action: () -> Bool) -> Bool {
@@ -160,11 +170,11 @@ struct LoginEditorState {
         return saved
     }
     mutating func requestDelete() { confirmingDelete = true; deletePending = true }
-    mutating func finishDelete(confirmed: Bool, delete: () -> Void) {
+    mutating func finishDelete(confirmed: Bool, delete: () -> Bool) {
         guard deletePending else { return }
         deletePending = false
         confirmingDelete = false
-        if confirmed { delete() }
+        if confirmed { deleteFailed = !delete() }
     }
 }
 

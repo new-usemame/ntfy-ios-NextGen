@@ -1300,34 +1300,47 @@ class Store: ObservableObject {
         return saved
     }
 
-    /// A typed replacement uses the existing Keychain item and keeps secrets out of Core Data.
+    /// Typed credentials own their method, username and secret in one atomic Keychain item.
+    /// Core Data keeps the server row and the username needed only by legacy raw passwords.
     @discardableResult
     func saveUser(baseUrl: String, credential: ServerCredential) -> Bool {
         var saved = false
         context.performAndWait {
             let normalized = normalizeBaseUrl(baseUrl)
             let existing = getUser(baseUrl: normalized)
-            let oldUsername = existing?.username ?? "?"
-            let previous: ServerCredential?
-            switch credentialStore.readCredential(baseUrl: normalized, username: oldUsername) {
-            case .found(let value): previous = value
-            case .notFound: previous = nil
-            case .failed: return
-            }
-            guard credentialStore.setCredential(credential, baseUrl: normalized) else { return }
-            do {
-                let user = existing ?? User(context: context)
+            let previous = credentialStore.readCredential(baseUrl: normalized, username: existing?.username ?? "")
+            if case .failed = previous { return }
+            let user = existing ?? User(context: context)
+            if existing == nil {
                 user.baseUrl = normalized
-                user.username = credential.isAccessToken ? "" : credential.username
+                user.username = ""
                 user.password = ""
-                try context.save()
-                saved = true
-            } catch {
-                let restored = previous.map { credentialStore.setCredential($0, baseUrl: normalized) }
-                    ?? credentialStore.deletePassword(baseUrl: normalized)
-                if !restored { Log.w(Store.tag, "Cannot restore credential after account save failed") }
-                rollbackAndRefresh()
             }
+            if let legacy = user.password, !legacy.isEmpty {
+                // An older, pre-Keychain row must keep its original secret until migration saves.
+                if case .notFound = previous,
+                   !credentialStore.setCredential(.basic(username: user.username ?? "", password: legacy), baseUrl: normalized) {
+                    return
+                }
+                user.password = ""
+            }
+            do {
+                // Validate/persist the server row before replacing its credential. No Core Data
+                // write follows a successful Keychain write, so replacement needs no rollback.
+                try context.save()
+            } catch {
+                rollbackAndRefresh()
+                return
+            }
+            guard credentialStore.setCredential(credential, baseUrl: normalized) else {
+                if existing == nil {
+                    context.delete(user)
+                    do { try context.save() } catch { rollbackAndRefresh() }
+                }
+                return
+            }
+            saved = true
+            objectWillChange.send()
         }
         return saved
     }
@@ -1426,22 +1439,37 @@ class Store: ObservableObject {
         return match
     }
     
-    func delete(user: User) {
+    @discardableResult
+    func delete(user: User) -> Bool {
+        var deleted = false
         context.performAndWait {
-            let baseUrl = user.baseUrl
+            guard let baseUrl = user.baseUrl else { return }
+            let previous: ServerCredential?
+            switch credentialStore.readCredential(baseUrl: baseUrl, username: user.username ?? "") {
+            case .found(let credential): previous = credential
+            case .notFound: previous = nil
+            case .failed: return
+            }
+            var removedCredential = false
             do {
+                // Catch validation failures before removing the account's only credential.
+                try context.save()
+                guard credentialStore.deletePassword(baseUrl: baseUrl) else { return }
+                removedCredential = true
                 context.delete(user)
                 try context.save()
-                if let baseUrl, !credentialStore.deletePassword(baseUrl: baseUrl) {
-                    Log.w(Store.tag, "Deleted user but could not delete its Keychain password for \(baseUrl)")
-                }
+                deleted = true
             } catch let error {
                 Log.w(Store.tag, "Cannot delete user", error)
                 rollbackAndRefresh()
+                if removedCredential, let previous, !credentialStore.setCredential(previous, baseUrl: baseUrl) {
+                    Log.w(Store.tag, "Cannot restore credential after account deletion failed")
+                }
             }
         }
+        return deleted
     }
-    
+
     // MARK: Preferences
     
     func saveDefaultBaseUrl(baseUrl: String?) {

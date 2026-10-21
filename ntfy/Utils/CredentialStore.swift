@@ -301,10 +301,8 @@ final class KeychainCredentialStore: CredentialStoring, TopicSecretStoring {
             // Legacy 1.18 bytes are interpreted as a password credential without rewriting on
             // read. This keeps background NSE reads from racing an app-side token replacement.
             // The next explicit save writes the typed envelope to the same item.
-            // The username remains editable in Core Data for password accounts.
-            if case .basic(_, let password) = credential {
-                return .found(.basic(username: username, password: password))
-            }
+            // Typed envelopes carry the authoritative username with the secret. Only legacy
+            // raw bytes use the Core Data username supplied to the decoder.
             return .found(credential)
         case .notFound: return .notFound
         case .failed(let status): return .failed(status)
