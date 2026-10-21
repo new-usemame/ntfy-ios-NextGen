@@ -161,10 +161,7 @@ final class NavigationPilotUITests: XCTestCase {
     }
 
     func muteScreenshot(_ name: String) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
+        captureAX(name)
     }
     func revealMuteChoice(_ title: String, scrollingUp: Bool = true) -> XCUIElement {
         let button = app.buttons[title]
@@ -307,6 +304,14 @@ final class NavigationPilotUITests: XCTestCase {
         captureAX("settings-users")
         app.buttons["Add user"].tap()
         captureAX("user-editor")
+        XCTAssertTrue(app.buttons["Username and password"].isSelected)
+        XCTAssertEqual(app.textFields["server-username"].label, "Username")
+        XCTAssertEqual(app.secureTextFields["server-password"].label, "Password")
+        app.buttons["Access token"].tap()
+        XCTAssertTrue(app.buttons["Access token"].isSelected)
+        XCTAssertEqual(app.secureTextFields["server-access-token"].label, "Access token")
+        XCTAssertFalse(app.textFields["server-username"].exists)
+        captureAX("user-editor-access-token")
         app.buttons["Cancel"].tap()
         for _ in 0..<16 { if app.buttons["Custom HTTP headers"].isHittable { break }; app.swipeUp() }
         app.buttons["Custom HTTP headers"].tap()
@@ -317,6 +322,35 @@ final class NavigationPilotUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.navigationBars["What's new"].waitForExistence(timeout: 8))
         captureAX("whats-new")
+    }
+
+    func testTopicQRControlsHaveSpokenNames() {
+        launchList()
+        app.staticTexts["aaa-nav-000"].firstMatch.tap()
+        app.buttons["Topic actions"].tap()
+        app.buttons["Show QR code"].tap()
+        XCTAssertTrue(app.navigationBars["QR code"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.images["QR code for 127.0.0.1:1/aaa-nav-000"].exists)
+        XCTAssertTrue(app.buttons["Share"].exists)
+        XCTAssertTrue(app.buttons["Done"].exists)
+        captureAX("topic-qr-code")
+        app.buttons["Done"].tap()
+        app.navigationBars.buttons["Subscribed topics"].tap()
+        app.buttons["Add subscription"].tap()
+        let scan = app.buttons["Scan QR code"]
+        for _ in 0..<6 { if scan.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(scan.isHittable)
+        captureAX("add-subscription-scan-entry")
+        scan.tap()
+        XCTAssertTrue(app.navigationBars["Scan QR code"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["This device has no camera. Type the topic and server in instead."].exists)
+        XCTAssertFalse(app.images["camera"].exists)
+        let cancelScan = app.navigationBars["Scan QR code"].buttons["Cancel"]
+        XCTAssertTrue(cancelScan.exists)
+        captureAX("topic-qr-scanner")
+        cancelScan.tap()
+        XCTAssertTrue(app.navigationBars["Add subscription"].waitForExistence(timeout: 5))
+        app.buttons["Cancel"].tap()
     }
 
 }

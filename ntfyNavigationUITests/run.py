@@ -91,7 +91,8 @@ if args.seed:
     if not args.empty_fixture:
         with sqlite3.connect(store) as db:
             db.execute("DELETE FROM ZUSER")
-            db.execute("INSERT INTO ZUSER VALUES (1,6,1,'http://127.0.0.1:1','','accessibility-user')")
+            # A synthetic legacy password lets the current app migrate a real named login.
+            db.execute("INSERT INTO ZUSER VALUES (1,6,1,'http://127.0.0.1:1','accessibility-fixture-password','accessibility-user')")
             db.execute("UPDATE Z_PRIMARYKEY SET Z_MAX=1 WHERE Z_NAME='User'")
         image = store.parent / "accessibility-fixture.png"
         image.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII="))
