@@ -2,11 +2,11 @@
 
 The app and its notification extension compile the same `ntfy/Localization/Localizable.xcstrings`.
 Camera permission copy is in `ntfy/Localization/InfoPlist.xcstrings`, compiled into the app.
-The app-only `Legal.xcstrings` translates the displayed license notices and retains the canonical
-notices verbatim in its English resources. The generated license source remains unmodified.
+License terms and copyright notices remain verbatim in the generated `OpenSourceLicenses.swift`
+source in every language. Only the surrounding UI, descriptions and short license labels are translated.
 English is the source language. German is the first translation.
 
-Add a language to all three catalogs in Xcode and translate every entry. Add its language identifier to
+Add a language to both catalogs in Xcode and translate every entry. Add its language identifier to
 `knownRegions` if Xcode has not done so. No Swift changes are needed. `LocalizationTests` discovers
 languages from the catalogs and requires translated, nonempty values in every table. It checks format
 arguments as well. The tests copy the source catalog folder as a resource; there is no second
@@ -24,13 +24,19 @@ The tomorrow mute choice formats its actual deadline's time, including the user'
 
 Do not localize server message content, titles, tags, action labels, topic/server names or addresses.
 The publish commands and executable encryption examples remain executable original code. The text
-around them is translated. License display text is translated; canonical copyright names, addresses and English notices are
-preserved in the bundled English resources. Product and programming-language names remain proper names.
+around them is translated. Canonical license terms and copyright notices are never translated or
+reflowed. Product and programming-language names remain proper names.
 
 All historical release-note entries are translated as complete entries. Add future notes in English
 and all supported languages when the release version is bumped. Each entry stays in one language.
 
-Run the English unit suite and the existing 21 navigation tests. Run the German traversal separately:
+Decode diagnostics are stored as English source text with an internal diagnostic content type in the
+existing `contentType` field. The type distinguishes app copy from identical server text; history and
+banners resolve the diagnostic through the current language bundle. Keep diagnostic source keys stable
+when revising their displayed translations so existing history still resolves. A missing attachment
+name remains empty in storage and is resolved at display time. No Core Data model migration is needed.
+
+Run the English and German unit suites and the existing 21 navigation tests. Run the German traversal separately:
 
 ```sh
 python3 ntfyNavigationUITests/run.py "$UDID" "$APP" "$UI_DERIVED_DATA" "$OUTPUT" \

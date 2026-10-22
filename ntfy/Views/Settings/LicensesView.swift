@@ -10,28 +10,11 @@ struct OpenSourceComponent: Identifiable, Hashable {
 
     var id: String { name }
     var fullText: String { [notice, licenseText].compactMap { $0 }.joined(separator: "\n\n") }
-    var localizedFullText: String {
-        [notice, licenseText].compactMap { $0 }
-            .map { Bundle.main.localizedString(forKey: $0, value: $0, table: "Legal") }
-            .joined(separator: "\n\n")
-    }
+    // Legal terms and notices are canonical in every locale; only the surrounding UI is translated.
+    var localizedFullText: String { fullText }
 }
 
-enum OpenSourceLicenses {
-    /// License files are hard-wrapped at ~80 columns, which wraps raggedly on a phone. For display,
-    /// join the lines of each paragraph; blank lines still separate paragraphs. Words are unchanged.
-    static func reflowed(_ text: String) -> String {
-        text.components(separatedBy: "\n\n")
-            .map { paragraph in
-                paragraph.split(separator: "\n")
-                    .map { $0.trimmingCharacters(in: .whitespaces) }
-                    .filter { !$0.isEmpty }
-                    .joined(separator: " ")
-            }
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n\n")
-    }
-}
+enum OpenSourceLicenses {}
 
 struct LicensesView: View {
     var body: some View {
@@ -39,7 +22,7 @@ struct LicensesView: View {
             Section(footer: Text(String(localized: "NTFY me is built on these open-source projects."))) {
                 ForEach(OpenSourceLicenses.components) { component in
                     NavigationLink {
-                        LicenseTextView(text: Bundle.main.localizedString(forKey: component.detail, value: component.detail, table: nil) + "\n\n" + OpenSourceLicenses.reflowed(component.localizedFullText))
+                        LicenseTextView(text: Bundle.main.localizedString(forKey: component.detail, value: component.detail, table: nil) + "\n\n" + component.localizedFullText)
                             .navigationTitle(component.name)
                             .navigationBarTitleDisplayMode(.inline)
                     } label: {

@@ -45,11 +45,13 @@ extension Notification {
         return formatter.string(from: date)
     }
     
-    func formatMessage() -> String {
+    func formatMessage(bundle: Bundle = .main) -> String {
         // A stored locked placeholder is app copy, not server content. Resolve it again after
         // a language change without touching any readable message from the sender.
-        if encryptionState == .locked { return TopicEncryption.lockedPlaceholder }
-        let message = message ?? ""
+        if encryptionState == .locked {
+            return bundle.localizedString(forKey: "Encrypted message", value: nil, table: nil)
+        }
+        let message = Message.localizedBody(message, contentType: contentType, bundle: bundle)
         if let title = title, title != "" {
             return message
         }
@@ -98,7 +100,7 @@ extension Notification {
             return nil
         }
         return MessageAttachment(
-            name: attachmentName ?? String(localized: "attachment"),
+            name: attachmentName ?? "",
             type: attachmentType,
             size: attachmentSize == 0 ? nil : attachmentSize,
             expires: attachmentExpires == 0 ? nil : attachmentExpires,
@@ -322,17 +324,17 @@ struct MessageAttachment: Codable {
         return expires < Int64(referenceDate.timeIntervalSince1970)
     }
 
-    func displayName() -> String {
+    func displayName(bundle: Bundle = .main) -> String {
         if !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return name
         }
         if let parsedUrl = URL(string: url) {
             let filename = parsedUrl.lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !filename.isEmpty {
+            if !filename.isEmpty, filename != "/" {
                 return filename
             }
         }
-        return String(localized: "attachment")
+        return bundle.localizedString(forKey: "attachment", value: nil, table: nil)
     }
 
     func systemImageName() -> String {
@@ -413,7 +415,8 @@ struct Message: Decodable {
         self.time = time
         self.event = event
         self.topic = topic
-        self.message = Self.normalizedBody(message, encoding: encoding)
+        let normalized = Self.normalize(message, encoding: encoding)
+        self.message = normalized.body
         self.title = title
         self.priority = priority
         self.tags = tags
@@ -421,7 +424,7 @@ struct Message: Decodable {
         self.click = click
         self.pollId = pollId
         self.attachment = attachment
-        self.contentType = contentType
+        self.contentType = normalized.isDiagnostic ? Self.diagnosticContentType : contentType
         self.icon = icon
         self.sequenceID = sequenceID
     }
@@ -432,8 +435,9 @@ struct Message: Decodable {
         time = try container.decode(Int64.self, forKey: .time)
         event = try container.decode(String.self, forKey: .event)
         topic = try container.decode(String.self, forKey: .topic)
-        message = Self.normalizedBody(try container.decodeIfPresent(String.self, forKey: .message),
-                                      encoding: try container.decodeIfPresent(String.self, forKey: .encoding))
+        let normalized = Self.normalize(try container.decodeIfPresent(String.self, forKey: .message),
+                                        encoding: try container.decodeIfPresent(String.self, forKey: .encoding))
+        message = normalized.body
         title = try container.decodeIfPresent(String.self, forKey: .title)
         priority = try container.decodeIfPresent(Int16.self, forKey: .priority)
         tags = try container.decodeIfPresent([String].self, forKey: .tags)
@@ -441,26 +445,45 @@ struct Message: Decodable {
         click = try container.decodeIfPresent(String.self, forKey: .click)
         pollId = try container.decodeIfPresent(String.self, forKey: .pollId)
         attachment = try container.decodeIfPresent(MessageAttachment.self, forKey: .attachment)
-        contentType = try container.decodeIfPresent(String.self, forKey: .contentType)
+        let declaredContentType = try container.decodeIfPresent(String.self, forKey: .contentType)
+        contentType = normalized.isDiagnostic ? Self.diagnosticContentType : declaredContentType
         icon = try container.decodeIfPresent(String.self, forKey: .icon)
         sequenceID = try container.decodeIfPresent(String.self, forKey: .sequenceID)
     }
     
-    /// Normalize transport encoding at ingress, before storage, encryption or presentation.
-    /// The canonical message and its userInfo contain text only, so they cannot decode twice.
+    // Stored in the existing contentType field, so diagnostics need no schema migration and a
+    // sender's literal text matching an English diagnostic is never guessed to be app copy.
+    static let diagnosticContentType = "application/x-ntfy-decode-error"
+    private static let diagnostics = [
+        "This message uses an unsupported encoding.",
+        "This message could not be decoded (invalid base64).",
+        "This message contains binary data and cannot be displayed as text."
+    ]
+
+    static func localizedBody(_ body: String?, contentType: String?, bundle: Bundle = .main) -> String {
+        let body = body ?? ""
+        guard contentType == diagnosticContentType, diagnostics.contains(body) else { return body }
+        return bundle.localizedString(forKey: body, value: body, table: nil)
+    }
+
+    /// Transport normalization retains language-neutral source text for storage and userInfo.
+    /// The type marker distinguishes diagnostics from readable server content after a relaunch.
     static func normalizedBody(_ body: String?, encoding: String?) -> String? {
-        guard let body, let encoding, !encoding.isEmpty else { return body }
-        guard encoding == "base64" else {
-            return String(localized: "This message uses an unsupported encoding.")
-        }
+        normalize(body, encoding: encoding).body
+    }
+
+    static func normalizedDisplayBody(_ body: String?, encoding: String?) -> String {
+        let normalized = normalize(body, encoding: encoding)
+        return localizedBody(normalized.body, contentType: normalized.isDiagnostic ? diagnosticContentType : nil)
+    }
+
+    private static func normalize(_ body: String?, encoding: String?) -> (body: String?, isDiagnostic: Bool) {
+        guard let body, let encoding, !encoding.isEmpty else { return (body, false) }
+        guard encoding == "base64" else { return (diagnostics[0], true) }
         let encoded = body.components(separatedBy: .whitespacesAndNewlines).joined()
-        guard let data = Data(base64Encoded: encoded) else {
-            return String(localized: "This message could not be decoded (invalid base64).")
-        }
-        guard let text = String(data: data, encoding: .utf8) else {
-            return String(localized: "This message contains binary data and cannot be displayed as text.")
-        }
-        return text
+        guard let data = Data(base64Encoded: encoded) else { return (diagnostics[1], true) }
+        guard let text = String(data: data, encoding: .utf8) else { return (diagnostics[2], true) }
+        return (text, false)
     }
 
     func toUserInfo() -> [AnyHashable: Any] {
@@ -515,7 +538,7 @@ struct Message: Decodable {
         let attachment: MessageAttachment?
         if let attachmentUrl = attachmentUrl, !attachmentUrl.isEmpty {
             attachment = MessageAttachment(
-                name: userInfo["attachment_name"] as? String ?? String(localized: "attachment"),
+                name: userInfo["attachment_name"] as? String ?? "",
                 type: userInfo["attachment_type"] as? String,
                 size: Int64(userInfo["attachment_size"] as? String ?? "0").flatMap { $0 == 0 ? nil : $0 },
                 expires: Int64(userInfo["attachment_expires"] as? String ?? "0").flatMap { $0 == 0 ? nil : $0 },

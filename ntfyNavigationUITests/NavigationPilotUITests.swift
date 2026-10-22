@@ -378,8 +378,8 @@ final class GermanLocalizationUITests: XCTestCase {
         let shot = XCTAttachment(screenshot: app.screenshot())
         shot.name = "de-" + name; shot.lifetime = .keepAlways; add(shot)
     }
-    func reveal(_ element: XCUIElement, up: Bool = true) {
-        for _ in 0..<40 {
+    func reveal(_ element: XCUIElement, up: Bool = true, attempts: Int = 40) {
+        for _ in 0..<attempts {
             if element.exists && element.isHittable { return }
             // Small steps keep short controls from being skipped on SE at accessibility sizes.
             let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: up ? 0.70 : 0.45))
@@ -521,21 +521,22 @@ final class GermanLocalizationUITests: XCTestCase {
     func testGermanLicenseScreens() {
         launch()
         app.buttons["Einstellungen"].tap()
-        reveal(app.buttons["Lizenzen"])
+        // Settings spans about fifteen screens at AX5; keep small, non-skipping scroll steps.
+        reveal(app.buttons["Lizenzen"], attempts: 80)
         app.buttons["Lizenzen"].tap()
         XCTAssertTrue(app.navigationBars["Lizenzen"].waitForExistence(timeout: 4))
         capture("licenses-list")
         app.staticTexts["ntfy for iOS"].tap()
         let text = app.textViews["licenseText"]
         XCTAssertTrue(text.waitForExistence(timeout: 4))
-        XCTAssertTrue((text.value as? String)?.contains("Hiermit wird jeder Person") == true)
-        XCTAssertFalse((text.value as? String)?.contains("Permission is hereby granted") == true)
+        XCTAssertTrue((text.value as? String)?.contains("Permission is hereby granted") == true)
+        XCTAssertFalse((text.value as? String)?.contains("Hiermit wird jeder Person") == true)
         capture("license-mit-top")
         text.swipeUp(); capture("license-mit-bottom")
         app.navigationBars.buttons["Lizenzen"].tap()
         app.staticTexts["Firebase"].tap()
         XCTAssertTrue(text.waitForExistence(timeout: 4))
-        XCTAssertTrue((text.value as? String)?.contains("Begriffsbestimmungen") == true)
+        XCTAssertTrue((text.value as? String)?.contains("TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION") == true)
         capture("license-apache-top")
         text.swipeUp(); capture("license-apache-middle")
     }

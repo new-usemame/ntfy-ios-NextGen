@@ -47,12 +47,9 @@ final class LicensesTests: XCTestCase {
         }
     }
 
-    func testReflowKeepsEveryWordAndParagraph() {
+    func testDisplayKeepsEveryCanonicalCharacter() {
         for component in OpenSourceLicenses.components {
-            let original = component.fullText.split(whereSeparator: \.isWhitespace)
-            let shown = OpenSourceLicenses.reflowed(component.fullText).split(whereSeparator: \.isWhitespace)
-            XCTAssertEqual(original, shown, component.name)
+            XCTAssertEqual(component.localizedFullText, component.fullText, component.name)
         }
-        XCTAssertEqual(OpenSourceLicenses.reflowed("a\n  b\n\n\nc\nd"), "a b\n\nc d")
     }
 }

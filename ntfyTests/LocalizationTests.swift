@@ -1,4 +1,5 @@
 import XCTest
+import UserNotifications
 @testable import ntfy
 
 final class LocalizationTests: XCTestCase {
@@ -8,18 +9,14 @@ final class LocalizationTests: XCTestCase {
         let folder = try XCTUnwrap(Bundle(for: Self.self).resourceURL?.appendingPathComponent("Localization"))
         let urls = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "xcstrings" }
-        XCTAssertEqual(urls.count, 3)
+        XCTAssertEqual(urls.count, 2)
         let catalogs = try urls.map { try JSONSerialization.jsonObject(with: Data(contentsOf: $0)) as! [String: Any] }
         let tables = catalogs.map { $0["strings"] as! [String: [String: Any]] }
         let languages = Set(tables.flatMap { $0.values.flatMap { ($0["localizations"] as? [String: Any])?.keys.map { $0 } ?? [] } })
         XCTAssertTrue(languages.contains("de"))
-        let legal = tables[try XCTUnwrap(urls.firstIndex { $0.lastPathComponent == "Legal.xcstrings" })]
         let appCopy = tables[try XCTUnwrap(urls.firstIndex { $0.lastPathComponent == "Localizable.xcstrings" })]
         for component in OpenSourceLicenses.components {
             XCTAssertNotNil(appCopy[component.licenseName], "Missing license-name translation: \(component.licenseName)")
-            for notice in [component.notice, component.licenseText].compactMap({ $0 }) {
-                XCTAssertNotNil(legal[notice], "Generated notice changed; update its catalog translations: \(component.name)")
-            }
         }
 
         for (table, url) in zip(tables, urls) {
@@ -42,6 +39,85 @@ final class LocalizationTests: XCTestCase {
                 }
             }
         }
+    }
+
+    func testLicenseDetailKeepsCanonicalNoticesInGerman() {
+        for component in OpenSourceLicenses.components {
+            XCTAssertEqual(component.localizedFullText, component.fullText, component.name)
+        }
+    }
+
+    func testIngressFallbacksStayNeutralAndRenderInCurrentLanguage() throws {
+        let store = Store(inMemory: true)
+        let sub = store.saveSubscription(baseUrl: "https://localization.invalid", topic: "fallbacks")
+        let cases = [
+            ("future", "wire", "This message uses an unsupported encoding."),
+            ("base64", "not!base64", "This message could not be decoded (invalid base64)."),
+            ("base64", "//4A", "This message contains binary data and cannot be displayed as text.")
+        ]
+        for (index, item) in cases.enumerated() {
+            let (encoding, body, source) = item
+            let message = Message(id: "fallback-\(index)", time: 1_800_000_000 + Int64(index),
+                                  event: "message", topic: "fallbacks", message: body, encoding: encoding)
+            store.save(notificationsFromMessages: [message], withSubscription: sub)
+            let request = Notification.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", message.id)
+            let row = try XCTUnwrap(store.context.fetch(request).first)
+            XCTAssertEqual(row.message, source, "Persist the English source in every ingress locale")
+            XCTAssertEqual(row.formatMessage(), Bundle.main.localizedString(forKey: source, value: nil, table: nil))
+            // Each full-suite run ingests in its launch language (German or English). Re-read
+            // the saved row through both real language bundles, simulating a later app relaunch.
+            store.context.refresh(row, mergeChanges: false)
+            for language in ["en", "de"] {
+                let bundle = try XCTUnwrap(Bundle.main.path(forResource: language, ofType: "lproj").flatMap(Bundle.init(path:)))
+                XCTAssertEqual(row.formatMessage(bundle: bundle), bundle.localizedString(forKey: source, value: nil, table: nil))
+                let ordinary = Message(id: "server-\(index)-\(language)", time: 1_800_000_020,
+                                       event: "message", topic: "fallbacks", message: source)
+                XCTAssertEqual(Message.localizedBody(ordinary.message, contentType: ordinary.contentType, bundle: bundle), source,
+                               "A sender's identical sentence must remain verbatim")
+                let encodedText = Message(id: "utf8", time: 1, event: "message", topic: "fallbacks",
+                                          message: Data(source.utf8).base64EncodedString(), encoding: "base64")
+                XCTAssertEqual(Message.localizedBody(encodedText.message, contentType: encodedText.contentType, bundle: bundle), source)
+            }
+            let roundTrip = try XCTUnwrap(Message.from(userInfo: message.toUserInfo()))
+            XCTAssertEqual(roundTrip.message, source)
+            XCTAssertEqual(roundTrip.contentType, message.contentType, "NSE userInfo must retain diagnostic identity")
+            let json: [String: Any] = ["id": "json", "time": 1, "event": "message", "topic": "fallbacks",
+                                       "message": body, "encoding": encoding]
+            let decoded = try JSONDecoder().decode(Message.self, from: JSONSerialization.data(withJSONObject: json))
+            XCTAssertEqual(decoded.message, source)
+            XCTAssertEqual(decoded.contentType, message.contentType)
+            var pushedInfo = message.toUserInfo()
+            pushedInfo["message"] = body
+            pushedInfo["encoding"] = encoding
+            let pushed = try XCTUnwrap(Message.from(userInfo: pushedInfo))
+            XCTAssertEqual(pushed.message, source)
+            XCTAssertEqual(pushed.contentType, message.contentType)
+            let banner = UNMutableNotificationContent()
+            banner.modify(message: message, baseUrl: "https://localization.invalid", categoryRegistrationTimeout: 0)
+            XCTAssertEqual(banner.body, Bundle.main.localizedString(forKey: source, value: nil, table: nil))
+            banner.userInfo = pushedInfo
+            banner.body = body
+            XCTAssertEqual(UNNotificationContent.encryptionSafeFallback(banner).body,
+                           Bundle.main.localizedString(forKey: source, value: nil, table: nil))
+        }
+        let info: [AnyHashable: Any] = ["id": "unnamed", "time": "1800000010", "event": "message",
+                                     "topic": "fallbacks", "attachment_url": "https://attachments.invalid/"]
+        let message = try XCTUnwrap(Message.from(userInfo: info))
+        store.save(notificationsFromMessages: [message], withSubscription: sub)
+        let request = Notification.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", message.id)
+        let row = try XCTUnwrap(store.context.fetch(request).first)
+        XCTAssertTrue(row.attachmentName?.isEmpty != false, "Do not persist a localized fallback name")
+        XCTAssertEqual(row.messageAttachment()?.displayName(), String(localized: "attachment"))
+        store.context.refresh(row, mergeChanges: false)
+        for language in ["en", "de"] {
+            let bundle = try XCTUnwrap(Bundle.main.path(forResource: language, ofType: "lproj").flatMap(Bundle.init(path:)))
+            XCTAssertEqual(row.messageAttachment()?.displayName(bundle: bundle), bundle.localizedString(forKey: "attachment", value: nil, table: nil))
+        }
+        row.attachmentName = "Anhang"
+        let english = try XCTUnwrap(Bundle.main.path(forResource: "en", ofType: "lproj").flatMap(Bundle.init(path:)))
+        XCTAssertEqual(row.messageAttachment()?.displayName(bundle: english), "Anhang", "Preserve a sender's actual name")
     }
 
     private func stringUnits(_ node: Any) -> [[String: Any]] {
@@ -75,7 +151,6 @@ final class LocalizationTests: XCTestCase {
         XCTAssertEqual(bundle.localizedString(forKey: "Notification state synchronized", value: nil, table: nil), "Benachrichtigungsstatus synchronisiert")
         let canonicalMIT = OpenSourceLicenses.components[0].notice
         XCTAssertTrue(canonicalMIT.contains("Permission is hereby granted"))
-        XCTAssertTrue(bundle.localizedString(forKey: canonicalMIT, value: nil, table: "Legal").contains("Hiermit wird jeder Person"))
         let plugIns = try XCTUnwrap(Bundle.main.builtInPlugInsURL)
         let extensionURL = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: plugIns, includingPropertiesForKeys: nil).first { $0.pathExtension == "appex" })
         let extensionBundle = try XCTUnwrap(Bundle(url: extensionURL))
@@ -112,6 +187,7 @@ final class LocalizationTests: XCTestCase {
         locked.encryption = NotificationEncryption.locked.rawValue
         locked.message = "Dies ist ein gespeicherter Platzhalter in einer anderen Sprache"
         XCTAssertEqual(locked.formatMessage(), TopicEncryption.lockedPlaceholder)
+        XCTAssertEqual(locked.formatMessage(bundle: bundle), bundle.localizedString(forKey: "Encrypted message", value: nil, table: nil))
         locked.encryption = NotificationEncryption.none.rawValue
         XCTAssertEqual(locked.formatMessage(), locked.message, "readable server content must stay verbatim")
     }

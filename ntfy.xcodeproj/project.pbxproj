@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-        DE1190000000000000000006 /* Legal.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = DE1190000000000000000015; };
         DE1190000000000000000001 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = DE1190000000000000000011; };
         DE1190000000000000000002 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = DE1190000000000000000011; };
         DE1190000000000000000003 /* InfoPlist.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = DE1190000000000000000012; };
@@ -159,7 +158,6 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-        DE1190000000000000000015 = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = ntfy/Localization/Legal.xcstrings; sourceTree = SOURCE_ROOT; };
         DE1190000000000000000011 = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = ntfy/Localization/Localizable.xcstrings; sourceTree = SOURCE_ROOT; };
         DE1190000000000000000012 = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = ntfy/Localization/InfoPlist.xcstrings; sourceTree = SOURCE_ROOT; };
         DE1190000000000000000013 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalizationTests.swift; sourceTree = "<group>"; };
@@ -342,7 +340,6 @@
 			children = (
                 DE1190000000000000000011,
                 DE1190000000000000000012,
-                DE1190000000000000000015,
                 DE1190000000000000000014,
 				2F0C0F1A2FF0000100A52946 /* Base.xcconfig */,
 				9474F1BF282F2AA700CDE4DD /* ntfy */,
@@ -625,7 +622,6 @@
 			files = (
                 DE1190000000000000000001,
                 DE1190000000000000000003,
-                DE1190000000000000000006,
 				A3769C0118DB43D18B6C92DB /* PrivacyInfo.xcprivacy in Resources */,
 				9474F1C8282F2AA800CDE4DD /* Preview Assets.xcassets in Resources */,
 				9474F1C5282F2AA800CDE4DD /* Assets.xcassets in Resources */,
