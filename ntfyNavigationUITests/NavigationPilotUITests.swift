@@ -531,6 +531,8 @@ final class GermanLocalizationUITests: XCTestCase {
         XCTAssertTrue(text.waitForExistence(timeout: 4))
         XCTAssertTrue((text.value as? String)?.contains("Permission is hereby granted") == true)
         XCTAssertFalse((text.value as? String)?.contains("Hiermit wird jeder Person") == true)
+        // The file wraps "copy" and "of" onto separate lines; on a phone the paragraph is shown reflowed.
+        XCTAssertTrue((text.value as? String)?.contains("obtaining a copy of this software") == true)
         capture("license-mit-top")
         text.swipeUp(); capture("license-mit-bottom")
         app.navigationBars.buttons["Lizenzen"].tap()

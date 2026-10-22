@@ -24,8 +24,8 @@ The tomorrow mute choice formats its actual deadline's time, including the user'
 
 Do not localize server message content, titles, tags, action labels, topic/server names or addresses.
 The publish commands and executable encryption examples remain executable original code. The text
-around them is translated. Canonical license terms and copyright notices are never translated or
-reflowed. Product and programming-language names remain proper names.
+around them is translated. Canonical license terms and copyright notices are never translated. The
+Licenses screen joins each paragraph's hard-wrapped lines for a phone screen without changing a word. Product and programming-language names remain proper names.
 
 All historical release-note entries are translated as complete entries. Add future notes in English
 and all supported languages when the release version is bumped. Each entry stays in one language.
